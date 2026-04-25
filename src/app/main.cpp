@@ -1,25 +1,153 @@
-#include "grainrad/Image.hpp"
+#include "ShaderLoom/Image.hpp"
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <commdlg.h>
+#endif
 
 #include <GLFW/glfw3.h>
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <filesystem>
 #include <iostream>
+#include <optional>
 #include <string>
+#include <utility>
+
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
 
 namespace {
 
 constexpr float LeftRailWidth = 232.0F;
 constexpr float RightRailWidth = 300.0F;
-constexpr float HeaderHeight = 36.0F;
 constexpr float FooterHeight = 28.0F;
+
+struct LoadedImageState {
+    ShaderLoom::Image image;
+    std::filesystem::path path;
+    GLuint texture = 0;
+    float zoom = 1.0F;
+    ImVec2 pan = ImVec2(0.0F, 0.0F);
+    std::string error;
+
+    [[nodiscard]] bool hasImage() const noexcept {
+        return texture != 0 && !image.empty();
+    }
+};
 
 void glfwErrorCallback(int error, const char* description) {
     std::cerr << "GLFW error " << error << ": " << description << '\n';
 }
 
-void applyGrainradStyle() {
+std::string truncateMiddle(const std::string& value, std::size_t maxLength) {
+    if (value.size() <= maxLength) {
+        return value;
+    }
+    if (maxLength < 8) {
+        return value.substr(0, maxLength);
+    }
+
+    const std::size_t left = (maxLength - 3) / 2;
+    const std::size_t right = maxLength - 3 - left;
+    return value.substr(0, left) + "..." + value.substr(value.size() - right);
+}
+
+void destroyTexture(LoadedImageState& state) {
+    if (state.texture != 0) {
+        glDeleteTextures(1, &state.texture);
+        state.texture = 0;
+    }
+}
+
+bool loadImage(LoadedImageState& state, const std::filesystem::path& path) {
+    try {
+        ShaderLoom::Image loaded = ShaderLoom::Image::load(path);
+
+        GLuint texture = 0;
+        glGenTextures(1, &texture);
+        glBindTexture(GL_TEXTURE_2D, texture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_RGBA,
+            loaded.width(),
+            loaded.height(),
+            0,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            loaded.pixels().data()
+        );
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        destroyTexture(state);
+        state.image = std::move(loaded);
+        state.path = path;
+        state.texture = texture;
+        state.zoom = 1.0F;
+        state.pan = ImVec2(0.0F, 0.0F);
+        state.error.clear();
+        return true;
+    } catch (const std::exception& error) {
+        state.error = error.what();
+        return false;
+    }
+}
+
+void clearImage(LoadedImageState& state) {
+    destroyTexture(state);
+    state.image = ShaderLoom::Image();
+    state.path.clear();
+    state.zoom = 1.0F;
+    state.pan = ImVec2(0.0F, 0.0F);
+    state.error.clear();
+}
+
+#ifdef _WIN32
+std::optional<std::filesystem::path> browseForImage() {
+    char filename[MAX_PATH] = {};
+    OPENFILENAMEA dialog = {};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = nullptr;
+    dialog.lpstrFilter = "Images\0*.png;*.jpg;*.jpeg\0PNG\0*.png\0JPEG\0*.jpg;*.jpeg\0All Files\0*.*\0";
+    dialog.lpstrFile = filename;
+    dialog.nMaxFile = MAX_PATH;
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    dialog.lpstrDefExt = "png";
+
+    if (GetOpenFileNameA(&dialog) == TRUE) {
+        return std::filesystem::path(filename);
+    }
+    return std::nullopt;
+}
+#else
+std::optional<std::filesystem::path> browseForImage() {
+    return std::nullopt;
+}
+#endif
+
+void dropCallback(GLFWwindow* window, int count, const char** paths) {
+    auto* state = static_cast<LoadedImageState*>(glfwGetWindowUserPointer(window));
+    if (state == nullptr || count <= 0 || paths == nullptr) {
+        return;
+    }
+    loadImage(*state, std::filesystem::path(paths[0]));
+}
+
+void applyShaderLoomStyle() {
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = 0.0F;
     style.ChildRounding = 0.0F;
@@ -97,22 +225,45 @@ bool formatTile(const char* name, const char* extension, bool selected, const Im
     return clicked;
 }
 
-void drawLeftRail(int& selectedEffect) {
+void drawLeftRail(int& selectedEffect, LoadedImageState& imageState) {
     ImGui::BeginChild("left-rail", ImVec2(LeftRailWidth, 0.0F), true);
-    ImGui::TextUnformatted("Grainrad");
+    ImGui::TextUnformatted("ShaderLoom");
     ImGui::Separator();
 
     sectionTitle("- Input");
-    ImGui::TextDisabled("Image loaded");
-    ImGui::SameLine(172.0F);
-    ImGui::TextDisabled("Clear");
+    ImGui::TextDisabled("%s", imageState.hasImage() ? "Image loaded" : "No image");
+    if (imageState.hasImage()) {
+        ImGui::SameLine(174.0F);
+        if (ImGui::SmallButton("Clear")) {
+            clearImage(imageState);
+        }
+    }
     ImGui::TextDisabled("Resolution");
     ImGui::SameLine(124.0F);
-    ImGui::TextDisabled("2048 x 1076");
+    if (imageState.hasImage()) {
+        ImGui::TextDisabled("%d x %d", imageState.image.width(), imageState.image.height());
+    } else {
+        ImGui::TextDisabled("-");
+    }
     ImGui::TextDisabled("File");
     ImGui::SameLine(124.0F);
-    ImGui::TextDisabled("617398270_90594...");
-    ImGui::Button("Drop file or click to browse\nPNG, JPG, GIF, MP4, WebM, GLB", ImVec2(-1.0F, 56.0F));
+    if (imageState.hasImage()) {
+        ImGui::TextDisabled("%s", truncateMiddle(imageState.path.filename().string(), 18).c_str());
+    } else {
+        ImGui::TextDisabled("-");
+    }
+
+    if (ImGui::Button("Drop file or click to browse\nPNG, JPG", ImVec2(-1.0F, 56.0F))) {
+        if (const std::optional<std::filesystem::path> selected = browseForImage()) {
+            loadImage(imageState, *selected);
+        }
+    }
+
+    if (!imageState.error.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95F, 0.45F, 0.45F, 1.0F));
+        ImGui::TextWrapped("%s", imageState.error.c_str());
+        ImGui::PopStyleColor();
+    }
 
     sectionTitle("- Effects");
     const char* effects[] = {
@@ -150,8 +301,8 @@ void drawLeftRail(int& selectedEffect) {
     ImGui::EndChild();
 }
 
-void drawPreview(const char* effectName) {
-    ImGui::BeginChild("preview", ImVec2(0.0F, 0.0F), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+void drawPreview(const char* effectName, LoadedImageState& imageState, float width) {
+    ImGui::BeginChild("preview", ImVec2(width, 0.0F), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     const ImVec2 previewMin = ImGui::GetWindowPos();
     const ImVec2 previewSize = ImGui::GetWindowSize();
     ImDrawList* drawList = ImGui::GetWindowDrawList();
@@ -170,27 +321,81 @@ void drawPreview(const char* effectName) {
     ImGui::SameLine();
     ImGui::SmallButton("::");
 
-    const float imageWidth = previewSize.x - 40.0F;
-    const float imageHeight = imageWidth * 0.525F;
-    const ImVec2 imageMin(previewMin.x + 20.0F, previewMin.y + ((previewSize.y - imageHeight) * 0.52F));
-    const ImVec2 imageMax(imageMin.x + imageWidth, imageMin.y + imageHeight);
-    drawList->AddRectFilled(imageMin, imageMax, IM_COL32(11, 12, 12, 255));
-    drawList->AddRect(imageMin, imageMax, IM_COL32(34, 36, 36, 255));
+    const ImVec2 contentMin(previewMin.x + 18.0F, previewMin.y + 54.0F);
+    const ImVec2 contentMax(previewMin.x + previewSize.x - 18.0F, previewMin.y + previewSize.y - FooterHeight - 12.0F);
+    drawList->PushClipRect(contentMin, contentMax, true);
 
-    const char* sample = "@#MW&8%B$0OZmwqpdbkhao*+=-:. ";
-    for (float y = imageMin.y + 8.0F; y < imageMax.y - 8.0F; y += 9.0F) {
-        for (float x = imageMin.x + 8.0F; x < imageMax.x - 8.0F; x += 7.0F) {
-            const int index = static_cast<int>((x + y) / 11.0F) % 31;
-            const unsigned char tone = static_cast<unsigned char>(70 + ((static_cast<int>(x) ^ static_cast<int>(y)) & 95));
-            char glyph[2] = {sample[index], '\0'};
-            drawList->AddText(ImVec2(x, y), IM_COL32(tone, tone + 8, tone + 16, 210), glyph);
+    if (imageState.hasImage()) {
+        const float availableWidth = std::max(1.0F, contentMax.x - contentMin.x);
+        const float availableHeight = std::max(1.0F, contentMax.y - contentMin.y);
+        const float fit = std::min(
+            availableWidth / static_cast<float>(imageState.image.width()),
+            availableHeight / static_cast<float>(imageState.image.height())
+        );
+
+        if (ImGui::IsWindowHovered()) {
+            const ImGuiIO& io = ImGui::GetIO();
+            if (io.KeyCtrl && io.MouseWheel != 0.0F) {
+                imageState.zoom = std::clamp(imageState.zoom + (io.MouseWheel * 0.08F), 0.1F, 8.0F);
+            }
+            if (io.KeyAlt && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                imageState.pan.x += io.MouseDelta.x;
+                imageState.pan.y += io.MouseDelta.y;
+            }
+        }
+
+        const float scale = fit * imageState.zoom;
+        const float imageWidth = static_cast<float>(imageState.image.width()) * scale;
+        const float imageHeight = static_cast<float>(imageState.image.height()) * scale;
+        const ImVec2 imageMin(
+            contentMin.x + ((availableWidth - imageWidth) * 0.5F) + imageState.pan.x,
+            contentMin.y + ((availableHeight - imageHeight) * 0.5F) + imageState.pan.y
+        );
+        const ImVec2 imageMax(imageMin.x + imageWidth, imageMin.y + imageHeight);
+
+        drawList->AddRectFilled(imageMin, imageMax, IM_COL32(10, 11, 11, 255));
+        drawList->AddImage(
+            static_cast<ImTextureID>(imageState.texture),
+            imageMin,
+            imageMax,
+            ImVec2(0.0F, 0.0F),
+            ImVec2(1.0F, 1.0F)
+        );
+        drawList->AddRect(imageMin, imageMax, IM_COL32(34, 36, 36, 255));
+    } else {
+        const ImVec2 emptyMin(contentMin.x + 36.0F, contentMin.y + 72.0F);
+        const ImVec2 emptyMax(contentMax.x - 36.0F, contentMax.y - 72.0F);
+        drawList->AddRect(emptyMin, emptyMax, IM_COL32(28, 30, 30, 255));
+        const char* emptyText = "Drop a PNG or JPG here";
+        const ImVec2 emptyTextSize = ImGui::CalcTextSize(emptyText);
+        drawList->AddText(
+            ImVec2((emptyMin.x + emptyMax.x - emptyTextSize.x) * 0.5F, (emptyMin.y + emptyMax.y - emptyTextSize.y) * 0.5F),
+            IM_COL32(92, 96, 100, 255),
+            emptyText
+        );
+    }
+    drawList->PopClipRect();
+
+    if (imageState.hasImage()) {
+        ImGui::SetCursorPos(ImVec2(previewSize.x - 220.0F, previewSize.y - FooterHeight));
+        if (ImGui::SmallButton("-")) {
+            imageState.zoom = std::max(0.1F, imageState.zoom - 0.1F);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("%d%%", static_cast<int>(std::round(imageState.zoom * 100.0F)));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("+")) {
+            imageState.zoom = std::min(8.0F, imageState.zoom + 0.1F);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reset")) {
+            imageState.zoom = 1.0F;
+            imageState.pan = ImVec2(0.0F, 0.0F);
         }
     }
 
     ImGui::SetCursorPos(ImVec2(18.0F, previewSize.y - FooterHeight));
     ImGui::TextDisabled("Scroll to pan  Ctrl+Scroll to zoom  Alt+Drag to pan");
-    ImGui::SetCursorPos(ImVec2(previewSize.x - 220.0F, previewSize.y - FooterHeight));
-    ImGui::TextDisabled("-     92%%     +     Reset   100%%");
     ImGui::EndChild();
 }
 
@@ -309,7 +514,7 @@ void drawSettingsRail(const char* effectName) {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     glfwSetErrorCallback(glfwErrorCallback);
     if (!glfwInit()) {
         return 1;
@@ -319,7 +524,7 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    GLFWwindow* window = glfwCreateWindow(1440, 900, "Grainrad Offline Editor", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(1440, 900, "ShaderLoom Offline Editor", nullptr, nullptr);
     if (!window) {
         glfwTerminate();
         return 1;
@@ -328,9 +533,13 @@ int main() {
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
+    LoadedImageState imageState;
+    glfwSetWindowUserPointer(window, &imageState);
+    glfwSetDropCallback(window, dropCallback);
+
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    applyGrainradStyle();
+    applyShaderLoomStyle();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 
@@ -353,6 +562,10 @@ int main() {
         "VHS"
     };
 
+    if (argc > 1) {
+        loadImage(imageState, std::filesystem::path(argv[1]));
+    }
+
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
@@ -363,11 +576,12 @@ int main() {
         ImGuiViewport* viewport = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(viewport->WorkPos);
         ImGui::SetNextWindowSize(viewport->WorkSize);
-        ImGui::Begin("GrainradRoot", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGui::Begin("ShaderLoomRoot", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-        drawLeftRail(selectedEffect);
+        const float centerWidth = std::max(320.0F, viewport->WorkSize.x - LeftRailWidth - RightRailWidth);
+        drawLeftRail(selectedEffect, imageState);
         ImGui::SameLine(0.0F, 0.0F);
-        drawPreview(effects[selectedEffect]);
+        drawPreview(effects[selectedEffect], imageState, centerWidth);
         ImGui::SameLine(0.0F, 0.0F);
         drawSettingsRail(effects[selectedEffect]);
 
@@ -387,6 +601,7 @@ int main() {
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
+    destroyTexture(imageState);
     glfwDestroyWindow(window);
     glfwTerminate();
     return 0;
