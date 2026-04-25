@@ -25,3 +25,7 @@ Run the editor with an optional startup image:
 ```
 
 The editor also accepts PNG/JPG drag-and-drop, plus the Windows browse button in the left input panel.
+
+## Current Pipeline
+
+Loaded images are uploaded as OpenGL textures, rendered through a pass-through framebuffer pipeline, then displayed in the center preview. Preview zoom and pan are viewport-only state; they do not mutate source or export dimensions.

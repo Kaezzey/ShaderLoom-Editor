@@ -1,4 +1,5 @@
 #include "ShaderLoom/Image.hpp"
+#include "app/render/GLPipeline.hpp"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -42,6 +43,12 @@ struct LoadedImageState {
     [[nodiscard]] bool hasImage() const noexcept {
         return texture != 0 && !image.empty();
     }
+};
+
+struct RenderState {
+    ShaderLoom::app::PreviewPipeline previewPipeline;
+    GLuint previewTexture = 0;
+    std::string error;
 };
 
 void glfwErrorCallback(int error, const char* description) {
@@ -114,6 +121,26 @@ void clearImage(LoadedImageState& state) {
     state.zoom = 1.0F;
     state.pan = ImVec2(0.0F, 0.0F);
     state.error.clear();
+}
+
+void renderPreviewPipeline(LoadedImageState& imageState, RenderState& renderState) {
+    renderState.previewTexture = 0;
+    renderState.error.clear();
+
+    if (!imageState.hasImage()) {
+        return;
+    }
+
+    try {
+        renderState.previewTexture = renderState.previewPipeline.render(
+            imageState.texture,
+            imageState.image.width(),
+            imageState.image.height()
+        );
+    } catch (const std::exception& error) {
+        renderState.error = error.what();
+        renderState.previewTexture = imageState.texture;
+    }
 }
 
 #ifdef _WIN32
@@ -301,7 +328,7 @@ void drawLeftRail(int& selectedEffect, LoadedImageState& imageState) {
     ImGui::EndChild();
 }
 
-void drawPreview(const char* effectName, LoadedImageState& imageState, float width) {
+void drawPreview(const char* effectName, LoadedImageState& imageState, RenderState& renderState, float width) {
     ImGui::BeginChild("preview", ImVec2(width, 0.0F), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     const ImVec2 previewMin = ImGui::GetWindowPos();
     const ImVec2 previewSize = ImGui::GetWindowSize();
@@ -309,7 +336,7 @@ void drawPreview(const char* effectName, LoadedImageState& imageState, float wid
 
     drawList->AddRectFilled(previewMin, ImVec2(previewMin.x + previewSize.x, previewMin.y + previewSize.y), IM_COL32(4, 5, 5, 255));
 
-    const std::string title = std::string(effectName) + " [CPU]";
+    const std::string title = std::string(effectName) + (imageState.hasImage() ? " [OPENGL]" : " [READY]");
     const ImVec2 titleSize = ImGui::CalcTextSize(title.c_str());
     ImGui::SetCursorPos(ImVec2((previewSize.x - titleSize.x) * 0.5F, 16.0F));
     ImGui::TextDisabled("%s", title.c_str());
@@ -352,16 +379,25 @@ void drawPreview(const char* effectName, LoadedImageState& imageState, float wid
             contentMin.y + ((availableHeight - imageHeight) * 0.5F) + imageState.pan.y
         );
         const ImVec2 imageMax(imageMin.x + imageWidth, imageMin.y + imageHeight);
+        const GLuint previewTexture = renderState.previewTexture != 0 ? renderState.previewTexture : imageState.texture;
 
         drawList->AddRectFilled(imageMin, imageMax, IM_COL32(10, 11, 11, 255));
         drawList->AddImage(
-            static_cast<ImTextureID>(imageState.texture),
+            static_cast<ImTextureID>(previewTexture),
             imageMin,
             imageMax,
             ImVec2(0.0F, 0.0F),
             ImVec2(1.0F, 1.0F)
         );
         drawList->AddRect(imageMin, imageMax, IM_COL32(34, 36, 36, 255));
+
+        if (!renderState.error.empty()) {
+            drawList->AddText(
+                ImVec2(imageMin.x + 10.0F, imageMin.y + 10.0F),
+                IM_COL32(242, 116, 116, 255),
+                renderState.error.c_str()
+            );
+        }
     } else {
         const ImVec2 emptyMin(contentMin.x + 36.0F, contentMin.y + 72.0F);
         const ImVec2 emptyMax(contentMax.x - 36.0F, contentMax.y - 72.0F);
@@ -532,8 +568,17 @@ int main(int argc, char** argv) {
 
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
+    try {
+        ShaderLoom::app::loadOpenGLPipelineFunctions();
+    } catch (const std::exception& error) {
+        std::cerr << "OpenGL setup failed: " << error.what() << '\n';
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return 1;
+    }
 
     LoadedImageState imageState;
+    RenderState renderState;
     glfwSetWindowUserPointer(window, &imageState);
     glfwSetDropCallback(window, dropCallback);
 
@@ -568,6 +613,7 @@ int main(int argc, char** argv) {
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+        renderPreviewPipeline(imageState, renderState);
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
@@ -581,7 +627,7 @@ int main(int argc, char** argv) {
         const float centerWidth = std::max(320.0F, viewport->WorkSize.x - LeftRailWidth - RightRailWidth);
         drawLeftRail(selectedEffect, imageState);
         ImGui::SameLine(0.0F, 0.0F);
-        drawPreview(effects[selectedEffect], imageState, centerWidth);
+        drawPreview(effects[selectedEffect], imageState, renderState, centerWidth);
         ImGui::SameLine(0.0F, 0.0F);
         drawSettingsRail(effects[selectedEffect]);
 
@@ -601,6 +647,7 @@ int main(int argc, char** argv) {
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
+    renderState.previewPipeline.reset();
     destroyTexture(imageState);
     glfwDestroyWindow(window);
     glfwTerminate();

@@ -21,7 +21,10 @@
 ## Milestone 3: Render Pipeline
 
 - Shader, texture, framebuffer, and fullscreen-quad wrappers.
-- Ping-pong render passes:
+- Local OpenGL function loader for the Windows GLFW context.
+- First pass-through framebuffer pipeline:
+  source texture -> preview framebuffer -> ImGui preview texture.
+- Future ping-pong render passes:
   source -> adjustment -> processing -> effect -> post -> screen.
 - Keep preview pan/zoom separate from export output.
 

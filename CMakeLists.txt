@@ -55,6 +55,7 @@ if(ShaderLoom_BUILD_GUI)
 
     add_executable(ShaderLoom_editor
         src/app/main.cpp
+        src/app/render/GLPipeline.cpp
     )
 
     target_link_libraries(ShaderLoom_editor
