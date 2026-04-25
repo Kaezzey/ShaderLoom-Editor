@@ -30,10 +30,12 @@
 
 ## Milestone 4: First GPU Effects
 
+- ASCII GPU shader preview with character-set controls.
 - Halftone, dots, and contour fragment shaders.
 - Dynamic right-panel settings for the selected GPU effect.
 - Settings structs passed to shader uniforms.
-- Other effects remain pass-through until their modules are wired.
+- Dithering and Pixel Sort use CPU processors uploaded back into the OpenGL preview/export pipeline.
+- Effects list is trimmed to ASCII, Dithering, Halftone, Matrix Rain, Dots, Contour, and Pixel Sort.
 
 ## Milestone 5: Framebuffer Export
 
@@ -41,3 +43,5 @@
 - PNG and JPEG export through `stb_image_write`.
 - Keep planned export tiles visible for GIF, Video, SVG, Text, and Three.js.
 - Surface export status in the right settings rail.
+- Processing, Post-Processing, and Export sections are collapsible.
+- Checked post-processing items reveal their relevant settings.

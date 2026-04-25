@@ -162,6 +162,114 @@ void main() {
 }
 )";
 
+constexpr const char* PreprocessFragmentShader = R"(
+#version 330 core
+in vec2 vTexCoord;
+out vec4 fragColor;
+uniform sampler2D uSource;
+uniform vec2 uResolution;
+uniform int uInvert;
+uniform float uBrightness;
+uniform float uContrast;
+uniform float uSaturation;
+uniform float uHueRotation;
+uniform float uSharpness;
+uniform float uGamma;
+uniform float uBrightnessMap;
+uniform float uEdgeEnhance;
+uniform float uBlur;
+uniform float uQuantizeColors;
+
+float luma(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+}
+
+mat3 hueRotationMatrix(float angle) {
+    float s = sin(angle);
+    float c = cos(angle);
+    return mat3(
+        0.213 + c * 0.787 - s * 0.213, 0.715 - c * 0.715 - s * 0.715, 0.072 - c * 0.072 + s * 0.928,
+        0.213 - c * 0.213 + s * 0.143, 0.715 + c * 0.285 + s * 0.140, 0.072 - c * 0.072 - s * 0.283,
+        0.213 - c * 0.213 - s * 0.787, 0.715 - c * 0.715 + s * 0.715, 0.072 + c * 0.928 + s * 0.072
+    );
+}
+
+vec3 blurSample(vec2 uv, vec2 texel) {
+    vec3 sum = texture(uSource, uv).rgb * 4.0;
+    sum += texture(uSource, uv + vec2(texel.x, 0.0)).rgb;
+    sum += texture(uSource, uv - vec2(texel.x, 0.0)).rgb;
+    sum += texture(uSource, uv + vec2(0.0, texel.y)).rgb;
+    sum += texture(uSource, uv - vec2(0.0, texel.y)).rgb;
+    sum += texture(uSource, uv + texel).rgb;
+    sum += texture(uSource, uv - texel).rgb;
+    sum += texture(uSource, uv + vec2(texel.x, -texel.y)).rgb;
+    sum += texture(uSource, uv + vec2(-texel.x, texel.y)).rgb;
+    return sum / 12.0;
+}
+
+float sobel(vec2 uv, vec2 texel) {
+    float tl = luma(texture(uSource, uv + texel * vec2(-1.0, -1.0)).rgb);
+    float tc = luma(texture(uSource, uv + texel * vec2(0.0, -1.0)).rgb);
+    float tr = luma(texture(uSource, uv + texel * vec2(1.0, -1.0)).rgb);
+    float ml = luma(texture(uSource, uv + texel * vec2(-1.0, 0.0)).rgb);
+    float mr = luma(texture(uSource, uv + texel * vec2(1.0, 0.0)).rgb);
+    float bl = luma(texture(uSource, uv + texel * vec2(-1.0, 1.0)).rgb);
+    float bc = luma(texture(uSource, uv + texel * vec2(0.0, 1.0)).rgb);
+    float br = luma(texture(uSource, uv + texel * vec2(1.0, 1.0)).rgb);
+    float gx = -tl - 2.0 * ml - bl + tr + 2.0 * mr + br;
+    float gy = -tl - 2.0 * tc - tr + bl + 2.0 * bc + br;
+    return clamp(length(vec2(gx, gy)), 0.0, 1.0);
+}
+
+void main() {
+    vec2 texel = 1.0 / max(uResolution, vec2(1.0));
+    vec4 source = texture(uSource, vTexCoord);
+    vec3 color = source.rgb;
+
+    if (uBlur > 0.001) {
+        color = mix(color, blurSample(vTexCoord, texel * max(uBlur, 1.0)), clamp(uBlur / 10.0, 0.0, 1.0));
+    }
+
+    if (uInvert == 1) {
+        color = 1.0 - color;
+    }
+
+    color += uBrightness / 100.0;
+    color = (color - 0.5) * (1.0 + uContrast / 100.0) + 0.5;
+    float gray = luma(color);
+    color = mix(vec3(gray), color, 1.0 + uSaturation / 100.0);
+    color = hueRotationMatrix(radians(uHueRotation)) * color;
+    color = clamp(color, 0.0, 1.0);
+
+    if (uSharpness > 0.001) {
+        vec3 center = texture(uSource, vTexCoord).rgb;
+        vec3 sharp = center * 5.0
+            - texture(uSource, vTexCoord + vec2(texel.x, 0.0)).rgb
+            - texture(uSource, vTexCoord - vec2(texel.x, 0.0)).rgb
+            - texture(uSource, vTexCoord + vec2(0.0, texel.y)).rgb
+            - texture(uSource, vTexCoord - vec2(0.0, texel.y)).rgb;
+        color = mix(color, sharp, clamp(uSharpness / 5.0, 0.0, 1.0));
+    }
+
+    color = pow(clamp(color, 0.0, 1.0), vec3(1.0 / max(uGamma, 0.01)));
+
+    float mappedLuma = max(luma(color), 0.001);
+    float targetLuma = pow(mappedLuma, max(uBrightnessMap, 0.01));
+    color *= targetLuma / mappedLuma;
+
+    if (uEdgeEnhance > 0.001) {
+        color += sobel(vTexCoord, texel) * (uEdgeEnhance / 5.0);
+    }
+
+    if (uQuantizeColors > 1.0) {
+        float levels = max(uQuantizeColors - 1.0, 1.0);
+        color = floor(clamp(color, 0.0, 1.0) * levels + 0.5) / levels;
+    }
+
+    fragColor = vec4(clamp(color, 0.0, 1.0), source.a);
+}
+)";
+
 constexpr const char* HalftoneFragmentShader = R"(
 #version 330 core
 in vec2 vTexCoord;
@@ -171,6 +279,7 @@ uniform vec2 uResolution;
 uniform float uDotScale;
 uniform float uSpacing;
 uniform float uAngle;
+uniform int uShape;
 uniform int uInvert;
 
 float luma(vec3 color) {
@@ -198,7 +307,15 @@ void main() {
         tone = 1.0 - tone;
     }
     float radius = clamp(uDotScale, 0.0, 1.5) * (1.0 - tone);
-    float edge = smoothstep(radius, radius - 0.12, length(local));
+    float distanceValue = length(local);
+    if (uShape == 1) {
+        distanceValue = max(abs(local.x), abs(local.y));
+    } else if (uShape == 2) {
+        distanceValue = abs(local.x) + abs(local.y);
+    } else if (uShape == 3) {
+        distanceValue = abs(local.y);
+    }
+    float edge = smoothstep(radius, radius - 0.12, distanceValue);
     vec3 color = mix(vec3(0.0), source.rgb, edge);
     fragColor = vec4(color, source.a);
 }
@@ -212,6 +329,8 @@ uniform sampler2D uSource;
 uniform vec2 uResolution;
 uniform float uSize;
 uniform float uSpacing;
+uniform int uShape;
+uniform int uGridType;
 uniform int uInvert;
 
 float luma(vec3 color) {
@@ -221,6 +340,10 @@ float luma(vec3 color) {
 void main() {
     vec2 pixel = vTexCoord * uResolution;
     float spacing = max(uSpacing, 3.0);
+    if (uGridType == 1) {
+        float row = floor(pixel.y / spacing);
+        pixel.x += mod(row, 2.0) * spacing * 0.5;
+    }
     vec2 cell = floor(pixel / spacing);
     vec2 local = fract(pixel / spacing) * 2.0 - 1.0;
     vec2 sampleUv = clamp(((cell + 0.5) * spacing) / uResolution, 0.0, 1.0);
@@ -230,7 +353,13 @@ void main() {
         tone = 1.0 - tone;
     }
     float radius = clamp(uSize, 0.0, 2.0) * 0.45 * (1.0 - tone);
-    float mask = smoothstep(radius, radius - 0.08, length(local));
+    float distanceValue = length(local);
+    if (uShape == 1) {
+        distanceValue = max(abs(local.x), abs(local.y));
+    } else if (uShape == 2) {
+        distanceValue = abs(local.x) + abs(local.y);
+    }
+    float mask = smoothstep(radius, radius - 0.08, distanceValue);
     fragColor = vec4(mix(vec3(0.0), source.rgb, mask), source.a);
 }
 )";
@@ -270,6 +399,112 @@ void main() {
         filled = 1.0 - filled;
     }
     fragColor = vec4(mix(filled, vec3(0.0), line), source.a);
+}
+)";
+
+constexpr const char* PostFragmentShader = R"(
+#version 330 core
+in vec2 vTexCoord;
+out vec4 fragColor;
+uniform sampler2D uSource;
+uniform vec2 uResolution;
+uniform float uTime;
+uniform int uBloom;
+uniform int uGrain;
+uniform int uChromatic;
+uniform int uScanlines;
+uniform int uVignette;
+uniform int uCrtCurve;
+uniform int uPhosphor;
+uniform float uBloomThreshold;
+uniform float uBloomSoftThreshold;
+uniform float uBloomIntensity;
+uniform float uBloomRadius;
+uniform float uGrainIntensity;
+uniform float uGrainSize;
+uniform float uGrainSpeed;
+uniform float uChromaticAmount;
+uniform float uScanlineIntensity;
+uniform float uVignetteIntensity;
+uniform float uCrtCurveAmount;
+uniform float uPhosphorStrength;
+
+float luma(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+}
+
+float random(vec2 p) {
+    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+vec2 crtUv(vec2 uv) {
+    vec2 centered = uv * 2.0 - 1.0;
+    centered *= 1.0 + uCrtCurveAmount * dot(centered, centered);
+    return centered * 0.5 + 0.5;
+}
+
+void main() {
+    vec2 uv = vTexCoord;
+    if (uCrtCurve == 1) {
+        uv = crtUv(uv);
+        if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
+            fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+            return;
+        }
+    }
+
+    vec2 texel = 1.0 / max(uResolution, vec2(1.0));
+    vec4 base = texture(uSource, uv);
+    vec3 color = base.rgb;
+
+    if (uChromatic == 1) {
+        vec2 direction = normalize(uv - 0.5 + vec2(0.0001));
+        vec2 offset = direction * uChromaticAmount * texel;
+        color.r = texture(uSource, clamp(uv + offset, 0.0, 1.0)).r;
+        color.b = texture(uSource, clamp(uv - offset, 0.0, 1.0)).b;
+    }
+
+    if (uBloom == 1) {
+        vec3 bloom = vec3(0.0);
+        float total = 0.0;
+        float radius = max(uBloomRadius, 1.0);
+        for (int y = -2; y <= 2; ++y) {
+            for (int x = -2; x <= 2; ++x) {
+                vec2 o = vec2(float(x), float(y)) * texel * radius;
+                vec3 sampleColor = texture(uSource, clamp(uv + o, 0.0, 1.0)).rgb;
+                float bright = smoothstep(uBloomThreshold, uBloomThreshold + max(uBloomSoftThreshold, 0.001), luma(sampleColor));
+                bloom += sampleColor * bright;
+                total += 1.0;
+            }
+        }
+        color += (bloom / max(total, 1.0)) * uBloomIntensity;
+    }
+
+    if (uGrain == 1) {
+        float grain = random(floor(uv * uResolution / max(uGrainSize, 1.0)) + uTime * max(uGrainSpeed, 1.0));
+        color += (grain - 0.5) * (uGrainIntensity / 100.0);
+    }
+
+    if (uScanlines == 1) {
+        float line = 0.5 + 0.5 * sin(uv.y * uResolution.y * 3.14159265);
+        color *= 1.0 - (1.0 - line) * uScanlineIntensity;
+    }
+
+    if (uVignette == 1) {
+        float d = distance(uv, vec2(0.5));
+        float vig = smoothstep(0.35, 0.75, d);
+        color *= 1.0 - vig * uVignetteIntensity;
+    }
+
+    if (uPhosphor == 1) {
+        int stripe = int(mod(gl_FragCoord.x, 3.0));
+        vec3 mask = stripe == 0 ? vec3(1.0, 1.0 - uPhosphorStrength, 1.0 - uPhosphorStrength)
+                  : stripe == 1 ? vec3(1.0 - uPhosphorStrength, 1.0, 1.0 - uPhosphorStrength)
+                                : vec3(1.0 - uPhosphorStrength, 1.0 - uPhosphorStrength, 1.0);
+        color *= mask;
+    }
+
+    fragColor = vec4(clamp(color, 0.0, 1.0), base.a);
 }
 )";
 
@@ -555,55 +790,132 @@ void PreviewPipeline::initialize() {
         return;
     }
 
+    preprocessShader_.compile(PassthroughVertexShader, PreprocessFragmentShader);
     passthroughShader_.compile(PassthroughVertexShader, PassthroughFragmentShader);
     halftoneShader_.compile(PassthroughVertexShader, HalftoneFragmentShader);
     dotsShader_.compile(PassthroughVertexShader, DotsFragmentShader);
     contourShader_.compile(PassthroughVertexShader, ContourFragmentShader);
+    postShader_.compile(PassthroughVertexShader, PostFragmentShader);
     quad_.initialize();
     initialized_ = true;
 }
 
 GLuint PreviewPipeline::render(GLuint sourceTexture, int width, int height, const PreviewRenderSettings& settings) {
     initialize();
-    outputTexture_.resize(width, height);
-    outputFramebuffer_.attach(outputTexture_);
+    const GLuint effectSourceTexture = [&]() {
+        if (settings.sourceAlreadyProcessed) {
+            return sourceTexture;
+        }
 
-    outputFramebuffer_.bind();
+        preprocessTexture_.resize(width, height);
+        preprocessFramebuffer_.attach(preprocessTexture_);
+        preprocessFramebuffer_.bind();
+        glViewport(0, 0, width, height);
+        glDisable(GL_BLEND);
+        glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        preprocessShader_.use();
+        glActiveTexturePtr(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, sourceTexture);
+        preprocessShader_.setInt("uSource", 0);
+        preprocessShader_.setVec2("uResolution", static_cast<float>(width), static_cast<float>(height));
+        preprocessShader_.setInt("uInvert", settings.context.processing.invert ? 1 : 0);
+        preprocessShader_.setFloat("uBrightness", settings.context.adjustments.brightness);
+        preprocessShader_.setFloat("uContrast", settings.context.adjustments.contrast);
+        preprocessShader_.setFloat("uSaturation", settings.context.adjustments.saturation);
+        preprocessShader_.setFloat("uHueRotation", settings.context.adjustments.hueRotationDegrees);
+        preprocessShader_.setFloat("uSharpness", settings.context.adjustments.sharpness);
+        preprocessShader_.setFloat("uGamma", settings.context.adjustments.gamma);
+        preprocessShader_.setFloat("uBrightnessMap", settings.context.processing.brightnessMap);
+        preprocessShader_.setFloat("uEdgeEnhance", settings.context.processing.edgeEnhance);
+        preprocessShader_.setFloat("uBlur", settings.context.processing.blur);
+        preprocessShader_.setFloat("uQuantizeColors", static_cast<float>(settings.context.processing.quantizeColors));
+        quad_.draw();
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glUseProgramPtr(0);
+        Framebuffer::bindDefault();
+        return preprocessTexture_.id();
+    }();
+
+    effectTexture_.resize(width, height);
+    effectFramebuffer_.attach(effectTexture_);
+    effectFramebuffer_.bind();
     glViewport(0, 0, width, height);
     glDisable(GL_BLEND);
     glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    ShaderProgram* shader = &passthroughShader_;
+    ShaderProgram* effectShader = &passthroughShader_;
     if (settings.effect == PreviewEffect::Halftone) {
-        shader = &halftoneShader_;
+        effectShader = &halftoneShader_;
     } else if (settings.effect == PreviewEffect::Dots) {
-        shader = &dotsShader_;
+        effectShader = &dotsShader_;
     } else if (settings.effect == PreviewEffect::Contour) {
-        shader = &contourShader_;
+        effectShader = &contourShader_;
     }
 
-    shader->use();
+    effectShader->use();
     glActiveTexturePtr(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, sourceTexture);
-    shader->setInt("uSource", 0);
-    shader->setVec2("uResolution", static_cast<float>(width), static_cast<float>(height));
+    glBindTexture(GL_TEXTURE_2D, effectSourceTexture);
+    effectShader->setInt("uSource", 0);
+    effectShader->setVec2("uResolution", static_cast<float>(width), static_cast<float>(height));
 
     if (settings.effect == PreviewEffect::Halftone) {
-        shader->setFloat("uDotScale", settings.halftone.dotScale);
-        shader->setFloat("uSpacing", settings.halftone.spacing);
-        shader->setFloat("uAngle", settings.halftone.angleDegrees * 0.017453292519943295F);
-        shader->setInt("uInvert", settings.halftone.invert ? 1 : 0);
+        effectShader->setFloat("uDotScale", settings.halftone.dotScale);
+        effectShader->setFloat("uSpacing", settings.halftone.spacing);
+        effectShader->setFloat("uAngle", settings.halftone.angleDegrees * 0.017453292519943295F);
+        effectShader->setInt("uShape", settings.halftone.shape);
+        effectShader->setInt("uInvert", settings.halftone.invert ? 1 : 0);
     } else if (settings.effect == PreviewEffect::Dots) {
-        shader->setFloat("uSize", settings.dots.size);
-        shader->setFloat("uSpacing", settings.dots.spacing);
-        shader->setInt("uInvert", settings.dots.invert ? 1 : 0);
+        effectShader->setFloat("uSize", settings.dots.size);
+        effectShader->setFloat("uSpacing", settings.dots.spacing);
+        effectShader->setInt("uShape", settings.dots.shape);
+        effectShader->setInt("uGridType", settings.dots.gridType);
+        effectShader->setInt("uInvert", settings.dots.invert ? 1 : 0);
     } else if (settings.effect == PreviewEffect::Contour) {
-        shader->setFloat("uLevels", settings.contour.levels);
-        shader->setFloat("uLineThickness", settings.contour.lineThickness);
-        shader->setInt("uInvert", settings.contour.invert ? 1 : 0);
+        effectShader->setFloat("uLevels", settings.contour.levels);
+        effectShader->setFloat("uLineThickness", settings.contour.lineThickness);
+        effectShader->setInt("uInvert", settings.contour.invert ? 1 : 0);
     }
 
+    quad_.draw();
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgramPtr(0);
+    Framebuffer::bindDefault();
+
+    outputTexture_.resize(width, height);
+    outputFramebuffer_.attach(outputTexture_);
+    outputFramebuffer_.bind();
+    glViewport(0, 0, width, height);
+    glDisable(GL_BLEND);
+    glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+    glClear(GL_COLOR_BUFFER_BIT);
+    postShader_.use();
+    glActiveTexturePtr(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, effectTexture_.id());
+    postShader_.setInt("uSource", 0);
+    postShader_.setVec2("uResolution", static_cast<float>(width), static_cast<float>(height));
+    postShader_.setFloat("uTime", settings.timeSeconds);
+    postShader_.setInt("uBloom", settings.bloom ? 1 : 0);
+    postShader_.setInt("uGrain", settings.grain ? 1 : 0);
+    postShader_.setInt("uChromatic", settings.chromatic ? 1 : 0);
+    postShader_.setInt("uScanlines", settings.scanlines ? 1 : 0);
+    postShader_.setInt("uVignette", settings.vignette ? 1 : 0);
+    postShader_.setInt("uCrtCurve", settings.crtCurve ? 1 : 0);
+    postShader_.setInt("uPhosphor", settings.phosphor ? 1 : 0);
+    postShader_.setFloat("uBloomThreshold", settings.bloomThreshold);
+    postShader_.setFloat("uBloomSoftThreshold", settings.bloomSoftThreshold);
+    postShader_.setFloat("uBloomIntensity", settings.bloomIntensity);
+    postShader_.setFloat("uBloomRadius", settings.bloomRadius);
+    postShader_.setFloat("uGrainIntensity", settings.grainIntensity);
+    postShader_.setFloat("uGrainSize", settings.grainSize);
+    postShader_.setFloat("uGrainSpeed", settings.grainSpeed);
+    postShader_.setFloat("uChromaticAmount", settings.chromaticAmount);
+    postShader_.setFloat("uScanlineIntensity", settings.scanlineIntensity);
+    postShader_.setFloat("uVignetteIntensity", settings.vignetteIntensity);
+    postShader_.setFloat("uCrtCurveAmount", settings.crtCurveAmount);
+    postShader_.setFloat("uPhosphorStrength", settings.phosphorStrength);
     quad_.draw();
     glBindTexture(GL_TEXTURE_2D, 0);
     glUseProgramPtr(0);
@@ -638,13 +950,19 @@ bool PreviewPipeline::hasOutput() const noexcept {
 }
 
 void PreviewPipeline::reset() {
+    preprocessFramebuffer_.reset();
+    preprocessTexture_.reset();
+    effectFramebuffer_.reset();
+    effectTexture_.reset();
     outputFramebuffer_.reset();
     outputTexture_.reset();
     quad_.reset();
+    preprocessShader_ = ShaderProgram();
     passthroughShader_ = ShaderProgram();
     halftoneShader_ = ShaderProgram();
     dotsShader_ = ShaderProgram();
     contourShader_ = ShaderProgram();
+    postShader_ = ShaderProgram();
     initialized_ = false;
 }
 

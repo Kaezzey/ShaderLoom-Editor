@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ShaderLoom/Image.hpp"
+#include "ShaderLoom/Processing.hpp"
 
 #include <GLFW/glfw3.h>
 
@@ -20,6 +21,7 @@ enum class PreviewEffect {
 };
 
 struct HalftoneUniforms {
+    int shape = 0;
     float dotScale = 0.7F;
     float spacing = 7.0F;
     float angleDegrees = 15.0F;
@@ -27,6 +29,8 @@ struct HalftoneUniforms {
 };
 
 struct DotsUniforms {
+    int shape = 0;
+    int gridType = 0;
     float size = 1.3F;
     float spacing = 18.0F;
     bool invert = false;
@@ -40,9 +44,31 @@ struct ContourUniforms {
 
 struct PreviewRenderSettings {
     PreviewEffect effect = PreviewEffect::Passthrough;
+    RenderContext context;
     HalftoneUniforms halftone;
     DotsUniforms dots;
     ContourUniforms contour;
+    bool sourceAlreadyProcessed = false;
+    bool bloom = false;
+    bool grain = false;
+    bool chromatic = false;
+    bool scanlines = false;
+    bool vignette = false;
+    bool crtCurve = false;
+    bool phosphor = false;
+    float bloomThreshold = 0.1F;
+    float bloomSoftThreshold = 1.0F;
+    float bloomIntensity = 0.7F;
+    float bloomRadius = 7.0F;
+    float grainIntensity = 35.0F;
+    float grainSize = 2.0F;
+    float grainSpeed = 50.0F;
+    float chromaticAmount = 6.0F;
+    float scanlineIntensity = 0.25F;
+    float vignetteIntensity = 0.45F;
+    float crtCurveAmount = 0.12F;
+    float phosphorStrength = 0.35F;
+    float timeSeconds = 0.0F;
 };
 
 class ShaderProgram {
@@ -133,10 +159,16 @@ public:
 
 private:
     bool initialized_ = false;
+    ShaderProgram preprocessShader_;
     ShaderProgram passthroughShader_;
     ShaderProgram halftoneShader_;
     ShaderProgram dotsShader_;
     ShaderProgram contourShader_;
+    ShaderProgram postShader_;
+    RenderTexture preprocessTexture_;
+    Framebuffer preprocessFramebuffer_;
+    RenderTexture effectTexture_;
+    Framebuffer effectFramebuffer_;
     RenderTexture outputTexture_;
     Framebuffer outputFramebuffer_;
     FullscreenQuad quad_;

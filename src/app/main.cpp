@@ -1,4 +1,7 @@
 #include "ShaderLoom/Image.hpp"
+#include "ShaderLoom/effects/AsciiEffect.hpp"
+#include "ShaderLoom/effects/DitherEffect.hpp"
+#include "ShaderLoom/effects/PixelSortEffect.hpp"
 #include "app/render/GLPipeline.hpp"
 
 #ifdef _WIN32
@@ -20,7 +23,9 @@
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <iterator>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <utility>
 
@@ -50,6 +55,8 @@ struct LoadedImageState {
 struct RenderState {
     ShaderLoom::app::PreviewPipeline previewPipeline;
     GLuint previewTexture = 0;
+    GLuint cpuEffectTexture = 0;
+    std::string cpuEffectCacheKey;
     std::string error;
     std::string exportStatus;
 };
@@ -66,7 +73,34 @@ enum class ExportFormat {
 
 struct AppSettings {
     ShaderLoom::app::PreviewRenderSettings preview;
+    ShaderLoom::RenderContext context;
+    ShaderLoom::AsciiSettings ascii;
+    int asciiCharacterSet = 3;
+    ShaderLoom::DitherSettings dither;
+    ShaderLoom::PixelSortSettings pixelSort;
     ExportFormat exportFormat = ExportFormat::Png;
+    bool processingOpen = true;
+    bool postOpen = true;
+    bool exportOpen = true;
+    bool bloom = false;
+    bool grain = false;
+    bool chromatic = false;
+    bool scanlines = false;
+    bool vignette = false;
+    bool crtCurve = false;
+    bool phosphor = false;
+    float bloomThreshold = 0.1F;
+    float bloomSoftThreshold = 1.0F;
+    float bloomIntensity = 0.7F;
+    float bloomRadius = 7.0F;
+    float grainIntensity = 35.0F;
+    float grainSize = 2.0F;
+    float grainSpeed = 50.0F;
+    float chromaticAmount = 6.0F;
+    float scanlineIntensity = 0.25F;
+    float vignetteIntensity = 0.45F;
+    float crtCurveAmount = 0.12F;
+    float phosphorStrength = 0.35F;
 };
 
 void glfwErrorCallback(int error, const char* description) {
@@ -93,30 +127,44 @@ void destroyTexture(LoadedImageState& state) {
     }
 }
 
+void destroyRenderTextures(RenderState& state) {
+    if (state.cpuEffectTexture != 0) {
+        glDeleteTextures(1, &state.cpuEffectTexture);
+        state.cpuEffectTexture = 0;
+    }
+    state.cpuEffectCacheKey.clear();
+}
+
+void uploadImageToTexture(GLuint& texture, const ShaderLoom::Image& image) {
+    if (texture == 0) {
+        glGenTextures(1, &texture);
+    }
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        GL_RGBA,
+        image.width(),
+        image.height(),
+        0,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        image.pixels().data()
+    );
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
 bool loadImage(LoadedImageState& state, const std::filesystem::path& path) {
     try {
         ShaderLoom::Image loaded = ShaderLoom::Image::load(path);
 
         GLuint texture = 0;
-        glGenTextures(1, &texture);
-        glBindTexture(GL_TEXTURE_2D, texture);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexImage2D(
-            GL_TEXTURE_2D,
-            0,
-            GL_RGBA,
-            loaded.width(),
-            loaded.height(),
-            0,
-            GL_RGBA,
-            GL_UNSIGNED_BYTE,
-            loaded.pixels().data()
-        );
-        glBindTexture(GL_TEXTURE_2D, 0);
+        uploadImageToTexture(texture, loaded);
 
         destroyTexture(state);
         state.image = std::move(loaded);
@@ -145,16 +193,73 @@ ShaderLoom::app::PreviewEffect effectForIndex(int selectedEffect) {
     if (selectedEffect == 2) {
         return ShaderLoom::app::PreviewEffect::Halftone;
     }
-    if (selectedEffect == 4) {
+    if (selectedEffect == 3) {
         return ShaderLoom::app::PreviewEffect::Dots;
     }
-    if (selectedEffect == 5) {
+    if (selectedEffect == 4) {
         return ShaderLoom::app::PreviewEffect::Contour;
     }
     return ShaderLoom::app::PreviewEffect::Passthrough;
 }
 
-void renderPreviewPipeline(LoadedImageState& imageState, RenderState& renderState, const AppSettings& settings) {
+bool isCpuEffect(int selectedEffect) {
+    return selectedEffect == 0 || selectedEffect == 1 || selectedEffect == 5;
+}
+
+std::string cpuEffectCacheKey(const LoadedImageState& imageState, int selectedEffect, const AppSettings& settings) {
+    std::ostringstream key;
+    key << selectedEffect << '|'
+        << imageState.path.string() << '|'
+        << imageState.image.width() << 'x' << imageState.image.height() << '|'
+        << settings.context.adjustments.brightness << '|'
+        << settings.context.adjustments.contrast << '|'
+        << settings.context.adjustments.saturation << '|'
+        << settings.context.adjustments.gamma << '|'
+        << settings.context.processing.invert << '|'
+        << settings.context.processing.brightnessMap << '|'
+        << settings.context.processing.quantizeColors << '|';
+
+    if (selectedEffect == 1) {
+        key << static_cast<int>(settings.dither.algorithm) << '|'
+            << settings.dither.intensity << '|'
+            << settings.dither.modulation;
+    } else if (selectedEffect == 6) {
+        key << static_cast<int>(settings.pixelSort.direction) << '|'
+            << static_cast<int>(settings.pixelSort.sortMode) << '|'
+            << settings.pixelSort.threshold << '|'
+            << settings.pixelSort.streakLength << '|'
+            << settings.pixelSort.intensity << '|'
+            << settings.pixelSort.randomness << '|'
+            << settings.pixelSort.reverse;
+    }
+    return key.str();
+}
+
+GLuint sourceTextureForRender(LoadedImageState& imageState, RenderState& renderState, int selectedEffect, const AppSettings& settings) {
+    if (!imageState.hasImage() || !isCpuEffect(selectedEffect)) {
+        return imageState.texture;
+    }
+
+    const std::string key = cpuEffectCacheKey(imageState, selectedEffect, settings);
+    if (renderState.cpuEffectTexture != 0 && renderState.cpuEffectCacheKey == key) {
+        return renderState.cpuEffectTexture;
+    }
+
+    ShaderLoom::Image processed = imageState.image;
+    if (selectedEffect == 1) {
+        ShaderLoom::DitherEffect dither;
+        processed = dither.apply(imageState.image, settings.dither, settings.context);
+    } else if (selectedEffect == 6) {
+        ShaderLoom::PixelSortEffect pixelSort;
+        processed = pixelSort.apply(imageState.image, settings.pixelSort, settings.context);
+    }
+
+    uploadImageToTexture(renderState.cpuEffectTexture, processed);
+    renderState.cpuEffectCacheKey = key;
+    return renderState.cpuEffectTexture;
+}
+
+void renderPreviewPipeline(LoadedImageState& imageState, RenderState& renderState, int selectedEffect, const AppSettings& settings) {
     renderState.previewTexture = 0;
     renderState.error.clear();
 
@@ -163,8 +268,9 @@ void renderPreviewPipeline(LoadedImageState& imageState, RenderState& renderStat
     }
 
     try {
+        const GLuint sourceTexture = sourceTextureForRender(imageState, renderState, selectedEffect, settings);
         renderState.previewTexture = renderState.previewPipeline.render(
-            imageState.texture,
+            sourceTexture,
             imageState.image.width(),
             imageState.image.height(),
             settings.preview
@@ -319,6 +425,16 @@ void sectionTitle(const char* title) {
     ImGui::Separator();
 }
 
+bool sectionToggle(const char* title, bool& open) {
+    ImGui::Spacing();
+    const std::string label = std::string(open ? "- " : "+ ") + title;
+    if (ImGui::Selectable(label.c_str(), false, 0, ImVec2(0.0F, 22.0F))) {
+        open = !open;
+    }
+    ImGui::Separator();
+    return open;
+}
+
 void valueSlider(const char* label, float* value, float min, float max, const char* format = "%.1f") {
     ImGui::PushID(label);
     std::string visibleLabel = label;
@@ -437,15 +553,7 @@ void drawLeftRail(int& selectedEffect, LoadedImageState& imageState) {
         "Matrix Rain",
         "Dots",
         "Contour",
-        "Pixel Sort",
-        "Blockify",
-        "Threshold",
-        "Edge Detection",
-        "Crosshatch",
-        "Wave Lines",
-        "Noise Field",
-        "Voronoi",
-        "VHS"
+        "Pixel Sort"
     };
 
     for (int i = 0; i < static_cast<int>(sizeof(effects) / sizeof(effects[0])); ++i) {
@@ -573,7 +681,9 @@ void drawPreview(const char* effectName, LoadedImageState& imageState, RenderSta
 }
 
 void drawExportSection(const LoadedImageState& imageState, RenderState& renderState, AppSettings& settings) {
-    sectionTitle("- Export");
+    if (!sectionToggle("Export", settings.exportOpen)) {
+        return;
+    }
     ImGui::TextDisabled("Format");
 
     const char* names[] = {"PNG", "JPEG", "GIF", "Video", "SVG", "Text", "Three.js"};
@@ -622,30 +732,57 @@ void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedIm
     ImGui::TextDisabled("Reset");
 
     sectionTitle(effectName);
-    if (selectedEffect == 2) {
-        const char* shapes[] = {"Circle"};
-        static int shape = 0;
+    if (selectedEffect == 0) {
+        valueSlider("Scale", &settings.preview.ascii.scale, 0.1F, 4.0F, "%.0f");
+        valueSlider("Spacing", &settings.preview.ascii.spacing, 0.0F, 2.0F);
+        valueSlider("Output Width", &settings.preview.ascii.outputWidth, 0.0F, 4096.0F, "%.0f");
+        const char* characterSets[] = {"STANDARD", "BLOCKS", "BINARY", "DETAILED", "MINIMAL", "ALPHABETIC", "NUMERIC", "MATH", "SYMBOLS"};
+        ImGui::TextDisabled("Character Set");
+        ImGui::SameLine(92.0F);
+        ImGui::SetNextItemWidth(-1.0F);
+        ImGui::Combo("##ascii-character-set", &settings.preview.ascii.characterSet, characterSets, static_cast<int>(std::size(characterSets)));
+    } else if (selectedEffect == 1) {
+        const char* algorithms[] = {
+            "Floyd-Steinberg",
+            "Atkinson",
+            "Jarvis-Judice-Ninke",
+            "Stucki",
+            "Burkes",
+            "Sierra",
+            "Sierra Two-Row",
+            "Sierra Lite",
+            "Bayer 2x2"
+        };
+        int algorithm = static_cast<int>(settings.dither.algorithm);
+        ImGui::TextDisabled("Algorithm");
+        ImGui::SameLine(92.0F);
+        ImGui::SetNextItemWidth(-1.0F);
+        if (ImGui::Combo("##dither-algorithm", &algorithm, algorithms, static_cast<int>(std::size(algorithms)))) {
+            settings.dither.algorithm = static_cast<ShaderLoom::DitherAlgorithm>(algorithm);
+        }
+        valueSlider("Intensity", &settings.dither.intensity, 0.0F, 1.0F);
+        ImGui::Checkbox("Modulation", &settings.dither.modulation);
+    } else if (selectedEffect == 2) {
+        const char* shapes[] = {"Circle", "Square", "Diamond", "Line"};
         ImGui::TextDisabled("Shape");
         ImGui::SameLine(92.0F);
         ImGui::SetNextItemWidth(-1.0F);
-        ImGui::Combo("##halftone-shape", &shape, shapes, 1);
+        ImGui::Combo("##halftone-shape", &settings.preview.halftone.shape, shapes, static_cast<int>(std::size(shapes)));
         valueSlider("Dot Scale", &settings.preview.halftone.dotScale, 0.05F, 1.5F);
         valueSlider("Spacing", &settings.preview.halftone.spacing, 2.0F, 48.0F);
         valueSlider("Angle", &settings.preview.halftone.angleDegrees, -90.0F, 90.0F, "%.0f deg");
         ImGui::Checkbox("Invert", &settings.preview.halftone.invert);
     } else if (selectedEffect == 4) {
-        const char* shapes[] = {"Circle"};
-        static int shape = 0;
+        const char* shapes[] = {"Circle", "Square", "Diamond"};
         ImGui::TextDisabled("Shape");
         ImGui::SameLine(92.0F);
         ImGui::SetNextItemWidth(-1.0F);
-        ImGui::Combo("##dots-shape", &shape, shapes, 1);
-        const char* grids[] = {"Square Grid"};
-        static int grid = 0;
+        ImGui::Combo("##dots-shape", &settings.preview.dots.shape, shapes, static_cast<int>(std::size(shapes)));
+        const char* grids[] = {"Square Grid", "Hexagonal Grid"};
         ImGui::TextDisabled("Grid Type");
         ImGui::SameLine(92.0F);
         ImGui::SetNextItemWidth(-1.0F);
-        ImGui::Combo("##dots-grid", &grid, grids, 1);
+        ImGui::Combo("##dots-grid", &settings.preview.dots.gridType, grids, static_cast<int>(std::size(grids)));
         valueSlider("Size", &settings.preview.dots.size, 0.05F, 2.0F);
         valueSlider("Spacing", &settings.preview.dots.spacing, 4.0F, 64.0F);
         ImGui::Checkbox("Invert", &settings.preview.dots.invert);
@@ -659,23 +796,43 @@ void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedIm
         valueSlider("Levels", &settings.preview.contour.levels, 2.0F, 32.0F, "%.0f");
         valueSlider("Line Thickness", &settings.preview.contour.lineThickness, 0.5F, 6.0F);
         ImGui::Checkbox("Invert", &settings.preview.contour.invert);
+    } else if (selectedEffect == 6) {
+        const char* directions[] = {"Horizontal", "Vertical", "Diagonal"};
+        int direction = static_cast<int>(settings.pixelSort.direction);
+        ImGui::TextDisabled("Direction");
+        ImGui::SameLine(92.0F);
+        ImGui::SetNextItemWidth(-1.0F);
+        if (ImGui::Combo("##pixelsort-direction", &direction, directions, static_cast<int>(std::size(directions)))) {
+            settings.pixelSort.direction = static_cast<ShaderLoom::PixelSortDirection>(direction);
+        }
+        const char* sortModes[] = {"Brightness", "Hue", "Saturation"};
+        int sortMode = static_cast<int>(settings.pixelSort.sortMode);
+        ImGui::TextDisabled("Sort Mode");
+        ImGui::SameLine(92.0F);
+        ImGui::SetNextItemWidth(-1.0F);
+        if (ImGui::Combo("##pixelsort-mode", &sortMode, sortModes, static_cast<int>(std::size(sortModes)))) {
+            settings.pixelSort.sortMode = static_cast<ShaderLoom::PixelSortMode>(sortMode);
+        }
+        valueSlider("Threshold", &settings.pixelSort.threshold, 0.0F, 1.0F);
+        float streakLength = static_cast<float>(settings.pixelSort.streakLength);
+        valueSlider("Streak Length", &streakLength, 1.0F, 512.0F, "%.0f");
+        settings.pixelSort.streakLength = static_cast<int>(std::round(streakLength));
+        valueSlider("Intensity", &settings.pixelSort.intensity, 0.0F, 1.0F);
+        valueSlider("Randomness", &settings.pixelSort.randomness, 0.0F, 1.0F);
+        ImGui::Checkbox("Reverse", &settings.pixelSort.reverse);
     } else {
         ImGui::TextDisabled("Preview pass-through");
     }
 
     sectionTitle("Adjustments");
-    static float brightness = 1.0F;
-    static float contrast = 0.0F;
-    static float saturation = 0.0F;
-    static float hueRotation = 0.0F;
-    static float sharpness = 0.0F;
-    static float gamma = 1.0F;
-    valueSlider("Brightness", &brightness, -100.0F, 100.0F, "%.0f");
-    valueSlider("Contrast", &contrast, -100.0F, 100.0F, "%.0f");
-    valueSlider("Saturation", &saturation, -100.0F, 100.0F, "%.0f");
-    valueSlider("Hue Rotation", &hueRotation, -180.0F, 180.0F, "%.0f deg");
-    valueSlider("Sharpness", &sharpness, 0.0F, 5.0F, "%.0f");
-    valueSlider("Gamma", &gamma, 0.1F, 4.0F);
+    valueSlider("Brightness", &settings.context.adjustments.brightness, -100.0F, 100.0F, "%.0f");
+    valueSlider("Contrast", &settings.context.adjustments.contrast, -100.0F, 100.0F, "%.0f");
+    if (selectedEffect == 0) {
+        valueSlider("Saturation", &settings.context.adjustments.saturation, -100.0F, 100.0F, "%.0f");
+        valueSlider("Hue Rotation", &settings.context.adjustments.hueRotationDegrees, -180.0F, 180.0F, "%.0f deg");
+    }
+    valueSlider(selectedEffect == 1 ? "Sharpen" : "Sharpness", &settings.context.adjustments.sharpness, 0.0F, 5.0F, "%.1f");
+    valueSlider("Gamma", &settings.context.adjustments.gamma, 0.1F, 4.0F);
 
     sectionTitle("Color");
     const char* modes[] = {"Original", "Monochrome", "Duotone"};
@@ -692,37 +849,52 @@ void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedIm
     static float intensity = 1.1F;
     valueSlider("Intensity", &intensity, 0.0F, 2.0F);
 
-    sectionTitle("+ Processing");
+    if (sectionToggle("Processing", settings.processingOpen)) {
+        ImGui::Checkbox("Invert", &settings.context.processing.invert);
+        valueSlider("Brightness Map", &settings.context.processing.brightnessMap, 0.1F, 4.0F);
+        valueSlider("Edge Enhance", &settings.context.processing.edgeEnhance, 0.0F, 5.0F, "%.0f");
+        valueSlider("Blur", &settings.context.processing.blur, 0.0F, 10.0F);
+        float quantize = static_cast<float>(settings.context.processing.quantizeColors);
+        valueSlider("Quantize Colors", &quantize, 0.0F, 32.0F, "%.0f");
+        settings.context.processing.quantizeColors = static_cast<int>(std::round(quantize));
+        valueSlider("Shape Matching", &settings.context.processing.shapeMatching, 0.0F, 1.0F);
+    }
 
-    sectionTitle("- Post-Processing");
-    static bool bloom = true;
-    static bool grain = true;
-    static bool chromatic = false;
-    static bool scanlines = false;
-    static bool vignette = false;
-    static bool crtCurve = false;
-    static bool phosphor = false;
-    ImGui::Checkbox("Bloom", &bloom);
-    static float threshold = 0.1F;
-    static float softThreshold = 1.0F;
-    static float bloomIntensity = 0.7F;
-    static float radius = 7.0F;
-    valueSlider("Threshold", &threshold, 0.0F, 1.0F);
-    valueSlider("Soft Threshold", &softThreshold, 0.0F, 2.0F);
-    valueSlider("Intensity", &bloomIntensity, 0.0F, 2.0F);
-    valueSlider("Radius", &radius, 0.0F, 32.0F, "%.0f");
-    ImGui::Checkbox("Grain", &grain);
-    static float grainIntensity = 35.0F;
-    static float grainSize = 2.0F;
-    static float grainSpeed = 50.0F;
-    valueSlider("Intensity##grain", &grainIntensity, 0.0F, 100.0F, "%.0f");
-    valueSlider("Size", &grainSize, 0.0F, 8.0F, "%.0f");
-    valueSlider("Speed", &grainSpeed, 0.0F, 100.0F, "%.0f");
-    ImGui::Checkbox("Chromatic", &chromatic);
-    ImGui::Checkbox("Scanlines", &scanlines);
-    ImGui::Checkbox("Vignette", &vignette);
-    ImGui::Checkbox("CRT Curve", &crtCurve);
-    ImGui::Checkbox("Phosphor", &phosphor);
+    if (sectionToggle("Post-Processing", settings.postOpen)) {
+        ImGui::Checkbox("Bloom", &settings.bloom);
+        if (settings.bloom) {
+            valueSlider("Threshold##bloom", &settings.bloomThreshold, 0.0F, 1.0F);
+            valueSlider("Soft Threshold", &settings.bloomSoftThreshold, 0.0F, 2.0F);
+            valueSlider("Intensity##bloom", &settings.bloomIntensity, 0.0F, 2.0F);
+            valueSlider("Radius", &settings.bloomRadius, 0.0F, 32.0F, "%.0f");
+        }
+        ImGui::Checkbox("Grain", &settings.grain);
+        if (settings.grain) {
+            valueSlider("Intensity##grain", &settings.grainIntensity, 0.0F, 100.0F, "%.0f");
+            valueSlider("Size", &settings.grainSize, 0.0F, 8.0F, "%.0f");
+            valueSlider("Speed", &settings.grainSpeed, 0.0F, 100.0F, "%.0f");
+        }
+        ImGui::Checkbox("Chromatic", &settings.chromatic);
+        if (settings.chromatic) {
+            valueSlider("Amount##chromatic", &settings.chromaticAmount, 0.0F, 32.0F, "%.0f");
+        }
+        ImGui::Checkbox("Scanlines", &settings.scanlines);
+        if (settings.scanlines) {
+            valueSlider("Intensity##scanlines", &settings.scanlineIntensity, 0.0F, 1.0F);
+        }
+        ImGui::Checkbox("Vignette", &settings.vignette);
+        if (settings.vignette) {
+            valueSlider("Intensity##vignette", &settings.vignetteIntensity, 0.0F, 1.0F);
+        }
+        ImGui::Checkbox("CRT Curve", &settings.crtCurve);
+        if (settings.crtCurve) {
+            valueSlider("Amount##crt", &settings.crtCurveAmount, 0.0F, 0.5F);
+        }
+        ImGui::Checkbox("Phosphor", &settings.phosphor);
+        if (settings.phosphor) {
+            valueSlider("Strength##phosphor", &settings.phosphorStrength, 0.0F, 1.0F);
+        }
+    }
 
     drawExportSection(imageState, renderState, settings);
     ImGui::EndChild();
@@ -777,15 +949,7 @@ int main(int argc, char** argv) {
         "Matrix Rain",
         "Dots",
         "Contour",
-        "Pixel Sort",
-        "Blockify",
-        "Threshold",
-        "Edge Detection",
-        "Crosshatch",
-        "Wave Lines",
-        "Noise Field",
-        "Voronoi",
-        "VHS"
+        "Pixel Sort"
     };
 
     if (argc > 1) {
@@ -795,7 +959,7 @@ int main(int argc, char** argv) {
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
         appSettings.preview.effect = effectForIndex(selectedEffect);
-        renderPreviewPipeline(imageState, renderState, appSettings);
+        renderPreviewPipeline(imageState, renderState, selectedEffect, appSettings);
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
@@ -830,6 +994,7 @@ int main(int argc, char** argv) {
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
     renderState.previewPipeline.reset();
+    destroyRenderTextures(renderState);
     destroyTexture(imageState);
     glfwDestroyWindow(window);
     glfwTerminate();

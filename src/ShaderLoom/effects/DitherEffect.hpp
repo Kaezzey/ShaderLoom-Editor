@@ -5,7 +5,20 @@
 
 namespace ShaderLoom {
 
+enum class DitherAlgorithm {
+    FloydSteinberg,
+    Atkinson,
+    JarvisJudiceNinke,
+    Stucki,
+    Burkes,
+    Sierra,
+    SierraTwoRow,
+    SierraLite,
+    Bayer2x2
+};
+
 struct DitherSettings {
+    DitherAlgorithm algorithm = DitherAlgorithm::FloydSteinberg;
     float intensity = 0.1F;
     bool modulation = false;
 };

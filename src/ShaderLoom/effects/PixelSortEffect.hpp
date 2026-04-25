@@ -5,7 +5,21 @@
 
 namespace ShaderLoom {
 
+enum class PixelSortDirection {
+    Horizontal,
+    Vertical,
+    Diagonal
+};
+
+enum class PixelSortMode {
+    Brightness,
+    Hue,
+    Saturation
+};
+
 struct PixelSortSettings {
+    PixelSortDirection direction = PixelSortDirection::Horizontal;
+    PixelSortMode sortMode = PixelSortMode::Brightness;
     float threshold = 0.2F;
     int streakLength = 110;
     float intensity = 0.7F;
