@@ -1,0 +1,4 @@
+C:/Users/niket/OneDrive/Desktop/Coding/Fun Software/ascii-software/build/CMakeFiles/grainrad_core.dir
+C:/Users/niket/OneDrive/Desktop/Coding/Fun Software/ascii-software/build/CMakeFiles/grainrad_cli.dir
+C:/Users/niket/OneDrive/Desktop/Coding/Fun Software/ascii-software/build/CMakeFiles/ALL_BUILD.dir
+C:/Users/niket/OneDrive/Desktop/Coding/Fun Software/ascii-software/build/CMakeFiles/ZERO_CHECK.dir
