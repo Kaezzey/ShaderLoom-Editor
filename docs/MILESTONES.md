@@ -31,5 +31,13 @@
 ## Milestone 4: First GPU Effects
 
 - Halftone, dots, and contour fragment shaders.
-- CPU ASCII, dithering, and pixel sort as effect modules.
-- Settings structs passed to shader uniforms or CPU effect functions.
+- Dynamic right-panel settings for the selected GPU effect.
+- Settings structs passed to shader uniforms.
+- Other effects remain pass-through until their modules are wired.
+
+## Milestone 5: Framebuffer Export
+
+- Export the final rendered framebuffer, not the preview viewport.
+- PNG and JPEG export through `stb_image_write`.
+- Keep planned export tiles visible for GIF, Video, SVG, Text, and Three.js.
+- Surface export status in the right settings rail.

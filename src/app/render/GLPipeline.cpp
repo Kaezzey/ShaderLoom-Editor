@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -59,6 +60,8 @@ using GlDeleteProgram = void(APIENTRY*)(GLuint);
 using GlUseProgram = void(APIENTRY*)(GLuint);
 using GlGetUniformLocation = GLint(APIENTRY*)(GLuint, const char*);
 using GlUniform1i = void(APIENTRY*)(GLint, GLint);
+using GlUniform1f = void(APIENTRY*)(GLint, GLfloat);
+using GlUniform2f = void(APIENTRY*)(GLint, GLfloat, GLfloat);
 using GlActiveTexture = void(APIENTRY*)(GLenum);
 using GlGenFramebuffers = void(APIENTRY*)(GLsizei, GLuint*);
 using GlBindFramebuffer = void(APIENTRY*)(GLenum, GLuint);
@@ -90,6 +93,8 @@ GlDeleteProgram glDeleteProgramPtr = nullptr;
 GlUseProgram glUseProgramPtr = nullptr;
 GlGetUniformLocation glGetUniformLocationPtr = nullptr;
 GlUniform1i glUniform1iPtr = nullptr;
+GlUniform1f glUniform1fPtr = nullptr;
+GlUniform2f glUniform2fPtr = nullptr;
 GlActiveTexture glActiveTexturePtr = nullptr;
 GlGenFramebuffers glGenFramebuffersPtr = nullptr;
 GlBindFramebuffer glBindFramebufferPtr = nullptr;
@@ -157,6 +162,117 @@ void main() {
 }
 )";
 
+constexpr const char* HalftoneFragmentShader = R"(
+#version 330 core
+in vec2 vTexCoord;
+out vec4 fragColor;
+uniform sampler2D uSource;
+uniform vec2 uResolution;
+uniform float uDotScale;
+uniform float uSpacing;
+uniform float uAngle;
+uniform int uInvert;
+
+float luma(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+}
+
+mat2 rotate2d(float angle) {
+    float s = sin(angle);
+    float c = cos(angle);
+    return mat2(c, -s, s, c);
+}
+
+void main() {
+    vec2 pixel = vTexCoord * uResolution;
+    vec2 center = uResolution * 0.5;
+    vec2 rotated = rotate2d(uAngle) * (pixel - center) + center;
+    float spacing = max(uSpacing, 2.0);
+    vec2 cell = floor(rotated / spacing);
+    vec2 local = fract(rotated / spacing) * 2.0 - 1.0;
+    vec2 samplePixel = (cell + 0.5) * spacing;
+    vec2 sampleUv = clamp((rotate2d(-uAngle) * (samplePixel - center) + center) / uResolution, 0.0, 1.0);
+    vec4 source = texture(uSource, sampleUv);
+    float tone = luma(source.rgb);
+    if (uInvert == 1) {
+        tone = 1.0 - tone;
+    }
+    float radius = clamp(uDotScale, 0.0, 1.5) * (1.0 - tone);
+    float edge = smoothstep(radius, radius - 0.12, length(local));
+    vec3 color = mix(vec3(0.0), source.rgb, edge);
+    fragColor = vec4(color, source.a);
+}
+)";
+
+constexpr const char* DotsFragmentShader = R"(
+#version 330 core
+in vec2 vTexCoord;
+out vec4 fragColor;
+uniform sampler2D uSource;
+uniform vec2 uResolution;
+uniform float uSize;
+uniform float uSpacing;
+uniform int uInvert;
+
+float luma(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+}
+
+void main() {
+    vec2 pixel = vTexCoord * uResolution;
+    float spacing = max(uSpacing, 3.0);
+    vec2 cell = floor(pixel / spacing);
+    vec2 local = fract(pixel / spacing) * 2.0 - 1.0;
+    vec2 sampleUv = clamp(((cell + 0.5) * spacing) / uResolution, 0.0, 1.0);
+    vec4 source = texture(uSource, sampleUv);
+    float tone = luma(source.rgb);
+    if (uInvert == 1) {
+        tone = 1.0 - tone;
+    }
+    float radius = clamp(uSize, 0.0, 2.0) * 0.45 * (1.0 - tone);
+    float mask = smoothstep(radius, radius - 0.08, length(local));
+    fragColor = vec4(mix(vec3(0.0), source.rgb, mask), source.a);
+}
+)";
+
+constexpr const char* ContourFragmentShader = R"(
+#version 330 core
+in vec2 vTexCoord;
+out vec4 fragColor;
+uniform sampler2D uSource;
+uniform vec2 uResolution;
+uniform float uLevels;
+uniform float uLineThickness;
+uniform int uInvert;
+
+float luma(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+}
+
+float bandAt(vec2 uv, float levels) {
+    float tone = luma(texture(uSource, clamp(uv, 0.0, 1.0)).rgb);
+    if (uInvert == 1) {
+        tone = 1.0 - tone;
+    }
+    return floor(tone * levels) / levels;
+}
+
+void main() {
+    float levels = max(uLevels, 2.0);
+    vec2 texel = max(uLineThickness, 0.5) / uResolution;
+    vec4 source = texture(uSource, vTexCoord);
+    float center = bandAt(vTexCoord, levels);
+    float right = bandAt(vTexCoord + vec2(texel.x, 0.0), levels);
+    float up = bandAt(vTexCoord + vec2(0.0, texel.y), levels);
+    float line = step(0.001, abs(center - right) + abs(center - up));
+    vec3 filled = floor(source.rgb * levels) / levels;
+    if (uInvert == 1) {
+        filled = 1.0 - filled;
+    }
+    fragColor = vec4(mix(filled, vec3(0.0), line), source.a);
+}
+)";
+
 } // namespace
 
 void loadOpenGLPipelineFunctions() {
@@ -175,6 +291,8 @@ void loadOpenGLPipelineFunctions() {
     glUseProgramPtr = loadFunction<GlUseProgram>("glUseProgram");
     glGetUniformLocationPtr = loadFunction<GlGetUniformLocation>("glGetUniformLocation");
     glUniform1iPtr = loadFunction<GlUniform1i>("glUniform1i");
+    glUniform1fPtr = loadFunction<GlUniform1f>("glUniform1f");
+    glUniform2fPtr = loadFunction<GlUniform2f>("glUniform2f");
     glActiveTexturePtr = loadFunction<GlActiveTexture>("glActiveTexture");
     glGenFramebuffersPtr = loadFunction<GlGenFramebuffers>("glGenFramebuffers");
     glBindFramebufferPtr = loadFunction<GlBindFramebuffer>("glBindFramebuffer");
@@ -246,6 +364,20 @@ void ShaderProgram::setInt(const char* name, int value) const {
     const GLint location = glGetUniformLocationPtr(program_, name);
     if (location >= 0) {
         glUniform1iPtr(location, value);
+    }
+}
+
+void ShaderProgram::setFloat(const char* name, float value) const {
+    const GLint location = glGetUniformLocationPtr(program_, name);
+    if (location >= 0) {
+        glUniform1fPtr(location, value);
+    }
+}
+
+void ShaderProgram::setVec2(const char* name, float x, float y) const {
+    const GLint location = glGetUniformLocationPtr(program_, name);
+    if (location >= 0) {
+        glUniform2fPtr(location, x, y);
     }
 }
 
@@ -424,11 +556,14 @@ void PreviewPipeline::initialize() {
     }
 
     passthroughShader_.compile(PassthroughVertexShader, PassthroughFragmentShader);
+    halftoneShader_.compile(PassthroughVertexShader, HalftoneFragmentShader);
+    dotsShader_.compile(PassthroughVertexShader, DotsFragmentShader);
+    contourShader_.compile(PassthroughVertexShader, ContourFragmentShader);
     quad_.initialize();
     initialized_ = true;
 }
 
-GLuint PreviewPipeline::render(GLuint sourceTexture, int width, int height) {
+GLuint PreviewPipeline::render(GLuint sourceTexture, int width, int height, const PreviewRenderSettings& settings) {
     initialize();
     outputTexture_.resize(width, height);
     outputFramebuffer_.attach(outputTexture_);
@@ -439,10 +574,36 @@ GLuint PreviewPipeline::render(GLuint sourceTexture, int width, int height) {
     glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    passthroughShader_.use();
+    ShaderProgram* shader = &passthroughShader_;
+    if (settings.effect == PreviewEffect::Halftone) {
+        shader = &halftoneShader_;
+    } else if (settings.effect == PreviewEffect::Dots) {
+        shader = &dotsShader_;
+    } else if (settings.effect == PreviewEffect::Contour) {
+        shader = &contourShader_;
+    }
+
+    shader->use();
     glActiveTexturePtr(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, sourceTexture);
-    passthroughShader_.setInt("uSource", 0);
+    shader->setInt("uSource", 0);
+    shader->setVec2("uResolution", static_cast<float>(width), static_cast<float>(height));
+
+    if (settings.effect == PreviewEffect::Halftone) {
+        shader->setFloat("uDotScale", settings.halftone.dotScale);
+        shader->setFloat("uSpacing", settings.halftone.spacing);
+        shader->setFloat("uAngle", settings.halftone.angleDegrees * 0.017453292519943295F);
+        shader->setInt("uInvert", settings.halftone.invert ? 1 : 0);
+    } else if (settings.effect == PreviewEffect::Dots) {
+        shader->setFloat("uSize", settings.dots.size);
+        shader->setFloat("uSpacing", settings.dots.spacing);
+        shader->setInt("uInvert", settings.dots.invert ? 1 : 0);
+    } else if (settings.effect == PreviewEffect::Contour) {
+        shader->setFloat("uLevels", settings.contour.levels);
+        shader->setFloat("uLineThickness", settings.contour.lineThickness);
+        shader->setInt("uInvert", settings.contour.invert ? 1 : 0);
+    }
+
     quad_.draw();
     glBindTexture(GL_TEXTURE_2D, 0);
     glUseProgramPtr(0);
@@ -451,11 +612,39 @@ GLuint PreviewPipeline::render(GLuint sourceTexture, int width, int height) {
     return outputTexture_.id();
 }
 
+Image PreviewPipeline::readOutputImage() const {
+    if (!hasOutput()) {
+        throw std::runtime_error("No rendered output is available to export.");
+    }
+
+    outputFramebuffer_.bind();
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(outputTexture_.width() * outputTexture_.height() * 4));
+    glReadPixels(0, 0, outputTexture_.width(), outputTexture_.height(), GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    Framebuffer::bindDefault();
+
+    const int stride = outputTexture_.width() * 4;
+    std::vector<std::uint8_t> flipped(pixels.size());
+    for (int y = 0; y < outputTexture_.height(); ++y) {
+        const std::size_t sourceOffset = static_cast<std::size_t>((outputTexture_.height() - 1 - y) * stride);
+        const std::size_t targetOffset = static_cast<std::size_t>(y * stride);
+        std::copy_n(pixels.data() + sourceOffset, static_cast<std::size_t>(stride), flipped.data() + targetOffset);
+    }
+
+    return Image(outputTexture_.width(), outputTexture_.height(), std::move(flipped));
+}
+
+bool PreviewPipeline::hasOutput() const noexcept {
+    return outputTexture_.id() != 0 && outputTexture_.width() > 0 && outputTexture_.height() > 0;
+}
+
 void PreviewPipeline::reset() {
     outputFramebuffer_.reset();
     outputTexture_.reset();
     quad_.reset();
     passthroughShader_ = ShaderProgram();
+    halftoneShader_ = ShaderProgram();
+    dotsShader_ = ShaderProgram();
+    contourShader_ = ShaderProgram();
     initialized_ = false;
 }
 

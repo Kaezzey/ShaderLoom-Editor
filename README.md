@@ -28,4 +28,6 @@ The editor also accepts PNG/JPG drag-and-drop, plus the Windows browse button in
 
 ## Current Pipeline
 
-Loaded images are uploaded as OpenGL textures, rendered through a pass-through framebuffer pipeline, then displayed in the center preview. Preview zoom and pan are viewport-only state; they do not mutate source or export dimensions.
+Loaded images are uploaded as OpenGL textures, rendered through a framebuffer pipeline, then displayed in the center preview. Halftone, Dots, and Contour are live GPU fragment-shader effects. Preview zoom and pan are viewport-only state; they do not mutate source or export dimensions.
+
+PNG and JPEG export read back the final rendered framebuffer. The remaining export formats are visible as planned formats but are not wired yet.

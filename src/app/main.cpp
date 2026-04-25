@@ -14,8 +14,10 @@
 #include <imgui_impl_opengl3.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <optional>
@@ -49,6 +51,22 @@ struct RenderState {
     ShaderLoom::app::PreviewPipeline previewPipeline;
     GLuint previewTexture = 0;
     std::string error;
+    std::string exportStatus;
+};
+
+enum class ExportFormat {
+    Png = 0,
+    Jpeg,
+    Gif,
+    Video,
+    Svg,
+    Text,
+    ThreeJs
+};
+
+struct AppSettings {
+    ShaderLoom::app::PreviewRenderSettings preview;
+    ExportFormat exportFormat = ExportFormat::Png;
 };
 
 void glfwErrorCallback(int error, const char* description) {
@@ -123,7 +141,20 @@ void clearImage(LoadedImageState& state) {
     state.error.clear();
 }
 
-void renderPreviewPipeline(LoadedImageState& imageState, RenderState& renderState) {
+ShaderLoom::app::PreviewEffect effectForIndex(int selectedEffect) {
+    if (selectedEffect == 2) {
+        return ShaderLoom::app::PreviewEffect::Halftone;
+    }
+    if (selectedEffect == 4) {
+        return ShaderLoom::app::PreviewEffect::Dots;
+    }
+    if (selectedEffect == 5) {
+        return ShaderLoom::app::PreviewEffect::Contour;
+    }
+    return ShaderLoom::app::PreviewEffect::Passthrough;
+}
+
+void renderPreviewPipeline(LoadedImageState& imageState, RenderState& renderState, const AppSettings& settings) {
     renderState.previewTexture = 0;
     renderState.error.clear();
 
@@ -135,12 +166,57 @@ void renderPreviewPipeline(LoadedImageState& imageState, RenderState& renderStat
         renderState.previewTexture = renderState.previewPipeline.render(
             imageState.texture,
             imageState.image.width(),
-            imageState.image.height()
+            imageState.image.height(),
+            settings.preview
         );
     } catch (const std::exception& error) {
         renderState.error = error.what();
         renderState.previewTexture = imageState.texture;
     }
+}
+
+const char* exportFormatName(ExportFormat format) {
+    switch (format) {
+    case ExportFormat::Png:
+        return "PNG";
+    case ExportFormat::Jpeg:
+        return "JPEG";
+    case ExportFormat::Gif:
+        return "GIF";
+    case ExportFormat::Video:
+        return "Video";
+    case ExportFormat::Svg:
+        return "SVG";
+    case ExportFormat::Text:
+        return "Text";
+    case ExportFormat::ThreeJs:
+        return "Three.js";
+    }
+    return "PNG";
+}
+
+const char* exportExtension(ExportFormat format) {
+    switch (format) {
+    case ExportFormat::Jpeg:
+        return ".jpg";
+    case ExportFormat::Gif:
+        return ".gif";
+    case ExportFormat::Video:
+        return ".mp4";
+    case ExportFormat::Svg:
+        return ".svg";
+    case ExportFormat::Text:
+        return ".txt";
+    case ExportFormat::ThreeJs:
+        return ".html";
+    case ExportFormat::Png:
+    default:
+        return ".png";
+    }
+}
+
+bool canExportRaster(ExportFormat format) {
+    return format == ExportFormat::Png || format == ExportFormat::Jpeg;
 }
 
 #ifdef _WIN32
@@ -160,8 +236,37 @@ std::optional<std::filesystem::path> browseForImage() {
     }
     return std::nullopt;
 }
+
+std::optional<std::filesystem::path> browseForExportPath(ExportFormat format, const std::filesystem::path& sourcePath) {
+    char filename[MAX_PATH] = {};
+    const std::string stem = sourcePath.empty() ? "ShaderLoom_export" : sourcePath.stem().string() + "_ShaderLoom";
+    const std::string defaultName = stem + exportExtension(format);
+    strncpy_s(filename, defaultName.c_str(), MAX_PATH - 1);
+
+    OPENFILENAMEA dialog = {};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = nullptr;
+    dialog.lpstrFilter = "PNG\0*.png\0JPEG\0*.jpg;*.jpeg\0All Files\0*.*\0";
+    dialog.lpstrFile = filename;
+    dialog.nMaxFile = MAX_PATH;
+    dialog.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
+    dialog.lpstrDefExt = format == ExportFormat::Jpeg ? "jpg" : "png";
+
+    if (GetSaveFileNameA(&dialog) == TRUE) {
+        std::filesystem::path selected(filename);
+        if (selected.extension().empty()) {
+            selected += exportExtension(format);
+        }
+        return selected;
+    }
+    return std::nullopt;
+}
 #else
 std::optional<std::filesystem::path> browseForImage() {
+    return std::nullopt;
+}
+
+std::optional<std::filesystem::path> browseForExportPath(ExportFormat, const std::filesystem::path&) {
     return std::nullopt;
 }
 #endif
@@ -250,6 +355,38 @@ bool formatTile(const char* name, const char* extension, bool selected, const Im
     ImGui::PopStyleColor(4);
     ImGui::PopID();
     return clicked;
+}
+
+void exportRenderedImage(const LoadedImageState& imageState, RenderState& renderState, ExportFormat format) {
+    if (!imageState.hasImage()) {
+        renderState.exportStatus = "Load an image first.";
+        return;
+    }
+    if (!canExportRaster(format)) {
+        renderState.exportStatus = std::string(exportFormatName(format)) + " export is not wired yet.";
+        return;
+    }
+    if (!renderState.previewPipeline.hasOutput()) {
+        renderState.exportStatus = "No rendered frame is ready yet.";
+        return;
+    }
+
+    try {
+        const std::optional<std::filesystem::path> selectedPath = browseForExportPath(format, imageState.path);
+        if (!selectedPath) {
+            return;
+        }
+
+        ShaderLoom::Image output = renderState.previewPipeline.readOutputImage();
+        if (format == ExportFormat::Jpeg) {
+            output.writeJpeg(*selectedPath);
+        } else {
+            output.writePng(*selectedPath);
+        }
+        renderState.exportStatus = "Exported " + selectedPath->filename().string();
+    } catch (const std::exception& error) {
+        renderState.exportStatus = error.what();
+    }
 }
 
 void drawLeftRail(int& selectedEffect, LoadedImageState& imageState) {
@@ -435,13 +572,13 @@ void drawPreview(const char* effectName, LoadedImageState& imageState, RenderSta
     ImGui::EndChild();
 }
 
-void drawExportSection() {
+void drawExportSection(const LoadedImageState& imageState, RenderState& renderState, AppSettings& settings) {
     sectionTitle("- Export");
     ImGui::TextDisabled("Format");
 
     const char* names[] = {"PNG", "JPEG", "GIF", "Video", "SVG", "Text", "Three.js"};
     const char* extensions[] = {".png", ".jpg", ".gif", ".mp4", ".svg", ".txt", ".html"};
-    static int selectedFormat = 0;
+    int selectedFormat = static_cast<int>(settings.exportFormat);
 
     const float gap = 6.0F;
     const float tileWidth = (ImGui::GetContentRegionAvail().x - gap) * 0.5F;
@@ -450,6 +587,7 @@ void drawExportSection() {
     for (int i = 0; i < 7; ++i) {
         if (formatTile(names[i], extensions[i], selectedFormat == i, tileSize)) {
             selectedFormat = i;
+            settings.exportFormat = static_cast<ExportFormat>(i);
         }
         if ((i % 2) == 0 && i != 6) {
             ImGui::SameLine(0.0F, gap);
@@ -459,29 +597,71 @@ void drawExportSection() {
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
-    ImGui::TextDisabled("High quality image");
-    ImGui::Button("Export PNG", ImVec2(-1.0F, 30.0F));
+    ImGui::TextDisabled(canExportRaster(settings.exportFormat) ? "High quality image" : "Planned export format");
+
+    const std::string buttonLabel = std::string("Export ") + exportFormatName(settings.exportFormat);
+    if (!canExportRaster(settings.exportFormat)) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button(buttonLabel.c_str(), ImVec2(-1.0F, 30.0F))) {
+        exportRenderedImage(imageState, renderState, settings.exportFormat);
+    }
+    if (!canExportRaster(settings.exportFormat)) {
+        ImGui::EndDisabled();
+    }
+
+    if (!renderState.exportStatus.empty()) {
+        ImGui::TextWrapped("%s", renderState.exportStatus.c_str());
+    }
 }
 
-void drawSettingsRail(const char* effectName) {
+void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedImageState& imageState, RenderState& renderState, AppSettings& settings) {
     ImGui::BeginChild("settings-rail", ImVec2(RightRailWidth, 0.0F), true);
     ImGui::TextUnformatted("- Settings");
     ImGui::SameLine(RightRailWidth - 56.0F);
     ImGui::TextDisabled("Reset");
 
     sectionTitle(effectName);
-    static float scale = 1.0F;
-    static float spacing = 0.0F;
-    static float outputWidth = 0.0F;
-    valueSlider("Scale", &scale, 0.0F, 4.0F, "%.0f");
-    valueSlider("Spacing", &spacing, 0.0F, 2.0F);
-    valueSlider("Output Width", &outputWidth, 0.0F, 4096.0F, "%.0f");
-    const char* characterSets[] = {"DETAILED", "BLOCKS", "MINIMAL"};
-    static int characterSet = 0;
-    ImGui::TextDisabled("Character Set");
-    ImGui::SameLine(92.0F);
-    ImGui::SetNextItemWidth(-1.0F);
-    ImGui::Combo("##character-set", &characterSet, characterSets, 3);
+    if (selectedEffect == 2) {
+        const char* shapes[] = {"Circle"};
+        static int shape = 0;
+        ImGui::TextDisabled("Shape");
+        ImGui::SameLine(92.0F);
+        ImGui::SetNextItemWidth(-1.0F);
+        ImGui::Combo("##halftone-shape", &shape, shapes, 1);
+        valueSlider("Dot Scale", &settings.preview.halftone.dotScale, 0.05F, 1.5F);
+        valueSlider("Spacing", &settings.preview.halftone.spacing, 2.0F, 48.0F);
+        valueSlider("Angle", &settings.preview.halftone.angleDegrees, -90.0F, 90.0F, "%.0f deg");
+        ImGui::Checkbox("Invert", &settings.preview.halftone.invert);
+    } else if (selectedEffect == 4) {
+        const char* shapes[] = {"Circle"};
+        static int shape = 0;
+        ImGui::TextDisabled("Shape");
+        ImGui::SameLine(92.0F);
+        ImGui::SetNextItemWidth(-1.0F);
+        ImGui::Combo("##dots-shape", &shape, shapes, 1);
+        const char* grids[] = {"Square Grid"};
+        static int grid = 0;
+        ImGui::TextDisabled("Grid Type");
+        ImGui::SameLine(92.0F);
+        ImGui::SetNextItemWidth(-1.0F);
+        ImGui::Combo("##dots-grid", &grid, grids, 1);
+        valueSlider("Size", &settings.preview.dots.size, 0.05F, 2.0F);
+        valueSlider("Spacing", &settings.preview.dots.spacing, 4.0F, 64.0F);
+        ImGui::Checkbox("Invert", &settings.preview.dots.invert);
+    } else if (selectedEffect == 5) {
+        const char* fillModes[] = {"Filled Bands"};
+        static int fillMode = 0;
+        ImGui::TextDisabled("Fill Mode");
+        ImGui::SameLine(92.0F);
+        ImGui::SetNextItemWidth(-1.0F);
+        ImGui::Combo("##contour-fill", &fillMode, fillModes, 1);
+        valueSlider("Levels", &settings.preview.contour.levels, 2.0F, 32.0F, "%.0f");
+        valueSlider("Line Thickness", &settings.preview.contour.lineThickness, 0.5F, 6.0F);
+        ImGui::Checkbox("Invert", &settings.preview.contour.invert);
+    } else {
+        ImGui::TextDisabled("Preview pass-through");
+    }
 
     sectionTitle("Adjustments");
     static float brightness = 1.0F;
@@ -544,7 +724,7 @@ void drawSettingsRail(const char* effectName) {
     ImGui::Checkbox("CRT Curve", &crtCurve);
     ImGui::Checkbox("Phosphor", &phosphor);
 
-    drawExportSection();
+    drawExportSection(imageState, renderState, settings);
     ImGui::EndChild();
 }
 
@@ -579,6 +759,7 @@ int main(int argc, char** argv) {
 
     LoadedImageState imageState;
     RenderState renderState;
+    AppSettings appSettings;
     glfwSetWindowUserPointer(window, &imageState);
     glfwSetDropCallback(window, dropCallback);
 
@@ -613,7 +794,8 @@ int main(int argc, char** argv) {
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
-        renderPreviewPipeline(imageState, renderState);
+        appSettings.preview.effect = effectForIndex(selectedEffect);
+        renderPreviewPipeline(imageState, renderState, appSettings);
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
@@ -629,7 +811,7 @@ int main(int argc, char** argv) {
         ImGui::SameLine(0.0F, 0.0F);
         drawPreview(effects[selectedEffect], imageState, renderState, centerWidth);
         ImGui::SameLine(0.0F, 0.0F);
-        drawSettingsRail(effects[selectedEffect]);
+        drawSettingsRail(effects[selectedEffect], selectedEffect, imageState, renderState, appSettings);
 
         ImGui::End();
 

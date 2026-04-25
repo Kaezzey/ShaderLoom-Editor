@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ShaderLoom/Image.hpp"
+
 #include <GLFW/glfw3.h>
 
 #include <string>
@@ -9,6 +11,39 @@
 #endif
 
 namespace ShaderLoom::app {
+
+enum class PreviewEffect {
+    Passthrough,
+    Halftone,
+    Dots,
+    Contour
+};
+
+struct HalftoneUniforms {
+    float dotScale = 0.7F;
+    float spacing = 7.0F;
+    float angleDegrees = 15.0F;
+    bool invert = false;
+};
+
+struct DotsUniforms {
+    float size = 1.3F;
+    float spacing = 18.0F;
+    bool invert = false;
+};
+
+struct ContourUniforms {
+    float levels = 8.0F;
+    float lineThickness = 1.0F;
+    bool invert = false;
+};
+
+struct PreviewRenderSettings {
+    PreviewEffect effect = PreviewEffect::Passthrough;
+    HalftoneUniforms halftone;
+    DotsUniforms dots;
+    ContourUniforms contour;
+};
 
 class ShaderProgram {
 public:
@@ -22,6 +57,8 @@ public:
     void compile(const char* vertexSource, const char* fragmentSource);
     void use() const;
     void setInt(const char* name, int value) const;
+    void setFloat(const char* name, float value) const;
+    void setVec2(const char* name, float x, float y) const;
     [[nodiscard]] GLuint id() const noexcept;
 
 private:
@@ -89,12 +126,17 @@ private:
 class PreviewPipeline {
 public:
     void initialize();
-    GLuint render(GLuint sourceTexture, int width, int height);
+    GLuint render(GLuint sourceTexture, int width, int height, const PreviewRenderSettings& settings);
+    [[nodiscard]] Image readOutputImage() const;
+    [[nodiscard]] bool hasOutput() const noexcept;
     void reset();
 
 private:
     bool initialized_ = false;
     ShaderProgram passthroughShader_;
+    ShaderProgram halftoneShader_;
+    ShaderProgram dotsShader_;
+    ShaderProgram contourShader_;
     RenderTexture outputTexture_;
     Framebuffer outputFramebuffer_;
     FullscreenQuad quad_;
