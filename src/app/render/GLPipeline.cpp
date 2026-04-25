@@ -588,6 +588,112 @@ void main() {
 }
 )";
 
+constexpr const char* PixelSortFragmentShader = R"(
+#version 330 core
+in vec2 vTexCoord;
+out vec4 fragColor;
+uniform sampler2D uSource;
+uniform vec2 uResolution;
+uniform int uDirection;
+uniform int uSortMode;
+uniform float uThreshold;
+uniform int uStreakLength;
+uniform float uIntensity;
+uniform float uRandomness;
+uniform int uReverse;
+
+float luma(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+}
+
+float saturation(vec3 color) {
+    float hi = max(max(color.r, color.g), color.b);
+    float lo = min(min(color.r, color.g), color.b);
+    return hi <= 0.0001 ? 0.0 : (hi - lo) / hi;
+}
+
+float hue(vec3 color) {
+    float hi = max(max(color.r, color.g), color.b);
+    float lo = min(min(color.r, color.g), color.b);
+    float delta = hi - lo;
+    if (delta <= 0.0001) {
+        return 0.0;
+    }
+    float h = 0.0;
+    if (hi == color.r) {
+        h = mod((color.g - color.b) / delta, 6.0);
+    } else if (hi == color.g) {
+        h = ((color.b - color.r) / delta) + 2.0;
+    } else {
+        h = ((color.r - color.g) / delta) + 4.0;
+    }
+    h /= 6.0;
+    return h < 0.0 ? h + 1.0 : h;
+}
+
+float sortMetric(vec3 color) {
+    if (uSortMode == 1) {
+        return hue(color);
+    }
+    if (uSortMode == 2) {
+        return saturation(color);
+    }
+    return luma(color);
+}
+
+float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+void main() {
+    vec4 source = texture(uSource, vTexCoord);
+    float metric = sortMetric(source.rgb);
+    float noise = hash(floor(vTexCoord * uResolution / 8.0));
+    float threshold = clamp(uThreshold + (noise - 0.5) * clamp(uRandomness, 0.0, 1.0) * 0.55, 0.0, 1.0);
+    if (metric <= threshold) {
+        fragColor = source;
+        return;
+    }
+
+    vec2 direction = vec2(1.0, 0.0);
+    if (uDirection == 1) {
+        direction = vec2(0.0, 1.0);
+    } else if (uDirection == 2) {
+        direction = normalize(vec2(1.0, 1.0));
+    }
+    if (uReverse == 1) {
+        direction = -direction;
+    }
+
+    vec2 texel = 1.0 / max(uResolution, vec2(1.0));
+    float streak = clamp(float(uStreakLength), 1.0, 512.0);
+    float jitter = (noise - 0.5) * clamp(uRandomness, 0.0, 1.0) * streak * 0.35;
+    vec3 accum = source.rgb;
+    float total = 1.0;
+    vec3 best = source.rgb;
+    float bestMetric = metric;
+
+    for (int i = 1; i <= 24; ++i) {
+        float t = float(i) / 24.0;
+        float distancePx = t * streak + jitter;
+        vec2 uv = clamp(vTexCoord - direction * texel * distancePx, vec2(0.0), vec2(1.0));
+        vec3 sampleColor = texture(uSource, uv).rgb;
+        float sampleMetric = sortMetric(sampleColor);
+        float gate = smoothstep(threshold, threshold + 0.18, sampleMetric);
+        accum += sampleColor * gate;
+        total += gate;
+        if ((uReverse == 0 && sampleMetric > bestMetric) || (uReverse == 1 && sampleMetric < bestMetric)) {
+            bestMetric = sampleMetric;
+            best = sampleColor;
+        }
+    }
+
+    vec3 smeared = accum / max(total, 1.0);
+    vec3 sortedColor = mix(smeared, best, 0.45);
+    fragColor = vec4(mix(source.rgb, sortedColor, clamp(uIntensity, 0.0, 1.0)), source.a);
+}
+)";
+
 constexpr const char* PostFragmentShader = R"(
 #version 330 core
 in vec2 vTexCoord;
@@ -983,6 +1089,7 @@ void PreviewPipeline::initialize() {
     halftoneShader_.compile(PassthroughVertexShader, HalftoneFragmentShader);
     dotsShader_.compile(PassthroughVertexShader, DotsFragmentShader);
     contourShader_.compile(PassthroughVertexShader, ContourFragmentShader);
+    pixelSortShader_.compile(PassthroughVertexShader, PixelSortFragmentShader);
     postShader_.compile(PassthroughVertexShader, PostFragmentShader);
     quad_.initialize();
     initialized_ = true;
@@ -1046,6 +1153,8 @@ GLuint PreviewPipeline::render(GLuint sourceTexture, int width, int height, cons
         effectShader = &dotsShader_;
     } else if (settings.effect == PreviewEffect::Contour) {
         effectShader = &contourShader_;
+    } else if (settings.effect == PreviewEffect::PixelSort) {
+        effectShader = &pixelSortShader_;
     }
 
     effectShader->use();
@@ -1085,6 +1194,14 @@ GLuint PreviewPipeline::render(GLuint sourceTexture, int width, int height, cons
         effectShader->setFloat("uLevels", settings.contour.levels);
         effectShader->setFloat("uLineThickness", settings.contour.lineThickness);
         effectShader->setInt("uInvert", settings.contour.invert ? 1 : 0);
+    } else if (settings.effect == PreviewEffect::PixelSort) {
+        effectShader->setInt("uDirection", settings.pixelSort.direction);
+        effectShader->setInt("uSortMode", settings.pixelSort.sortMode);
+        effectShader->setFloat("uThreshold", settings.pixelSort.threshold);
+        effectShader->setInt("uStreakLength", settings.pixelSort.streakLength);
+        effectShader->setFloat("uIntensity", settings.pixelSort.intensity);
+        effectShader->setFloat("uRandomness", settings.pixelSort.randomness);
+        effectShader->setInt("uReverse", settings.pixelSort.reverse ? 1 : 0);
     }
 
     quad_.draw();
@@ -1177,6 +1294,7 @@ void PreviewPipeline::reset() {
     halftoneShader_ = ShaderProgram();
     dotsShader_ = ShaderProgram();
     contourShader_ = ShaderProgram();
+    pixelSortShader_ = ShaderProgram();
     postShader_ = ShaderProgram();
     initialized_ = false;
 }

@@ -40,4 +40,11 @@ private:
     std::vector<std::uint8_t> rgba_;
 };
 
+struct ImageFrame {
+    Image image;
+    int durationMs = 100;
+};
+
+[[nodiscard]] std::vector<ImageFrame> loadImageFrames(const std::filesystem::path& path);
+
 } // namespace ShaderLoom

@@ -43,14 +43,22 @@ constexpr float FooterHeight = 28.0F;
 
 struct LoadedImageState {
     ShaderLoom::Image image;
+    std::vector<ShaderLoom::ImageFrame> frames;
     std::filesystem::path path;
     GLuint texture = 0;
     float zoom = 1.0F;
     ImVec2 pan = ImVec2(0.0F, 0.0F);
     std::string error;
+    int frameIndex = 0;
+    double frameAccumulator = 0.0;
+    double lastFrameTime = 0.0;
 
     [[nodiscard]] bool hasImage() const noexcept {
         return texture != 0 && !image.empty();
+    }
+
+    [[nodiscard]] bool isAnimated() const noexcept {
+        return frames.size() > 1;
     }
 };
 
@@ -167,6 +175,26 @@ void uploadImageToTexture(GLuint& texture, const ShaderLoom::Image& image) {
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
+void updateTexturePixels(GLuint texture, const ShaderLoom::Image& image) {
+    if (texture == 0 || image.empty()) {
+        return;
+    }
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(
+        GL_TEXTURE_2D,
+        0,
+        0,
+        0,
+        image.width(),
+        image.height(),
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        image.pixels().data()
+    );
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
 #ifdef _WIN32
 GLuint createAsciiGlyphAtlas(int tileWidth, int tileHeight, int columns, int rows) {
     const int atlasWidth = tileWidth * columns;
@@ -273,17 +301,22 @@ GLuint createAsciiGlyphAtlas(int, int, int, int) {
 
 bool loadImage(LoadedImageState& state, const std::filesystem::path& path) {
     try {
-        ShaderLoom::Image loaded = ShaderLoom::Image::load(path);
+        std::vector<ShaderLoom::ImageFrame> frames = ShaderLoom::loadImageFrames(path);
+        ShaderLoom::Image loaded = frames.front().image;
 
         GLuint texture = 0;
         uploadImageToTexture(texture, loaded);
 
         destroyTexture(state);
         state.image = std::move(loaded);
+        state.frames = std::move(frames);
         state.path = path;
         state.texture = texture;
         state.zoom = 1.0F;
         state.pan = ImVec2(0.0F, 0.0F);
+        state.frameIndex = 0;
+        state.frameAccumulator = 0.0;
+        state.lastFrameTime = glfwGetTime();
         state.error.clear();
         return true;
     } catch (const std::exception& error) {
@@ -295,10 +328,40 @@ bool loadImage(LoadedImageState& state, const std::filesystem::path& path) {
 void clearImage(LoadedImageState& state) {
     destroyTexture(state);
     state.image = ShaderLoom::Image();
+    state.frames.clear();
     state.path.clear();
     state.zoom = 1.0F;
     state.pan = ImVec2(0.0F, 0.0F);
+    state.frameIndex = 0;
+    state.frameAccumulator = 0.0;
+    state.lastFrameTime = 0.0;
     state.error.clear();
+}
+
+void advanceAnimation(LoadedImageState& state, double nowSeconds) {
+    if (!state.isAnimated() || state.texture == 0) {
+        state.lastFrameTime = nowSeconds;
+        return;
+    }
+
+    if (state.lastFrameTime <= 0.0) {
+        state.lastFrameTime = nowSeconds;
+        return;
+    }
+
+    state.frameAccumulator += std::max(0.0, nowSeconds - state.lastFrameTime) * 1000.0;
+    state.lastFrameTime = nowSeconds;
+
+    bool advanced = false;
+    while (state.frameAccumulator >= static_cast<double>(state.frames[static_cast<std::size_t>(state.frameIndex)].durationMs)) {
+        state.frameAccumulator -= static_cast<double>(state.frames[static_cast<std::size_t>(state.frameIndex)].durationMs);
+        state.frameIndex = (state.frameIndex + 1) % static_cast<int>(state.frames.size());
+        advanced = true;
+    }
+
+    if (advanced) {
+        updateTexturePixels(state.texture, state.frames[static_cast<std::size_t>(state.frameIndex)].image);
+    }
 }
 
 ShaderLoom::app::PreviewEffect effectForIndex(int selectedEffect) {
@@ -317,11 +380,14 @@ ShaderLoom::app::PreviewEffect effectForIndex(int selectedEffect) {
     if (selectedEffect == 4) {
         return ShaderLoom::app::PreviewEffect::Contour;
     }
+    if (selectedEffect == 5) {
+        return ShaderLoom::app::PreviewEffect::PixelSort;
+    }
     return ShaderLoom::app::PreviewEffect::Passthrough;
 }
 
 bool isCpuEffect(int selectedEffect) {
-    return selectedEffect == 5;
+    return false;
 }
 
 const char* asciiSetName(int index) {
@@ -535,6 +601,13 @@ void syncPreviewSettings(AppSettings& settings, int selectedEffect, float timeSe
     settings.preview.dither.algorithm = static_cast<int>(settings.dither.algorithm);
     settings.preview.dither.intensity = settings.dither.intensity;
     settings.preview.dither.modulation = settings.dither.modulation;
+    settings.preview.pixelSort.direction = static_cast<int>(settings.pixelSort.direction);
+    settings.preview.pixelSort.sortMode = static_cast<int>(settings.pixelSort.sortMode);
+    settings.preview.pixelSort.threshold = settings.pixelSort.threshold;
+    settings.preview.pixelSort.streakLength = settings.pixelSort.streakLength;
+    settings.preview.pixelSort.intensity = settings.pixelSort.intensity;
+    settings.preview.pixelSort.randomness = settings.pixelSort.randomness;
+    settings.preview.pixelSort.reverse = settings.pixelSort.reverse;
     settings.preview.bloom = settings.bloom;
     settings.preview.grain = settings.grain;
     settings.preview.chromatic = settings.chromatic;
@@ -697,7 +770,7 @@ std::optional<std::filesystem::path> browseForImage() {
     OPENFILENAMEA dialog = {};
     dialog.lStructSize = sizeof(dialog);
     dialog.hwndOwner = nullptr;
-    dialog.lpstrFilter = "Images\0*.png;*.jpg;*.jpeg\0PNG\0*.png\0JPEG\0*.jpg;*.jpeg\0All Files\0*.*\0";
+    dialog.lpstrFilter = "Images\0*.png;*.jpg;*.jpeg;*.gif\0PNG\0*.png\0JPEG\0*.jpg;*.jpeg\0GIF\0*.gif\0All Files\0*.*\0";
     dialog.lpstrFile = filename;
     dialog.nMaxFile = MAX_PATH;
     dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
@@ -899,7 +972,7 @@ void drawLeftRail(int& selectedEffect, LoadedImageState& imageState) {
         ImGui::TextDisabled("-");
     }
 
-    if (ImGui::Button("Drop file or click to browse\nPNG, JPG", ImVec2(-1.0F, 56.0F))) {
+    if (ImGui::Button("Drop file or click to browse\nPNG, JPG, GIF", ImVec2(-1.0F, 56.0F))) {
         if (const std::optional<std::filesystem::path> selected = browseForImage()) {
             loadImage(imageState, *selected);
         }
@@ -1012,7 +1085,7 @@ void drawPreview(const char* effectName, LoadedImageState& imageState, RenderSta
         const ImVec2 emptyMin(contentMin.x + 36.0F, contentMin.y + 72.0F);
         const ImVec2 emptyMax(contentMax.x - 36.0F, contentMax.y - 72.0F);
         drawList->AddRect(emptyMin, emptyMax, IM_COL32(28, 30, 30, 255));
-        const char* emptyText = "Drop a PNG or JPG here";
+        const char* emptyText = "Drop a PNG, JPG, or GIF here";
         const ImVec2 emptyTextSize = ImGui::CalcTextSize(emptyText);
         drawList->AddText(
             ImVec2((emptyMin.x + emptyMax.x - emptyTextSize.x) * 0.5F, (emptyMin.y + emptyMax.y - emptyTextSize.y) * 0.5F),
@@ -1337,7 +1410,9 @@ int main(int argc, char** argv) {
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
-        syncPreviewSettings(appSettings, selectedEffect, static_cast<float>(glfwGetTime()), renderState.glyphAtlasTexture);
+        const double now = glfwGetTime();
+        advanceAnimation(imageState, now);
+        syncPreviewSettings(appSettings, selectedEffect, static_cast<float>(now), renderState.glyphAtlasTexture);
         renderPreviewPipeline(imageState, renderState, selectedEffect, appSettings);
 
         ImGui_ImplOpenGL3_NewFrame();

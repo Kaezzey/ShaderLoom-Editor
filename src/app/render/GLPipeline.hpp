@@ -19,7 +19,8 @@ enum class PreviewEffect {
     Dither,
     Halftone,
     Dots,
-    Contour
+    Contour,
+    PixelSort
 };
 
 struct AsciiUniforms {
@@ -60,6 +61,16 @@ struct ContourUniforms {
     bool invert = false;
 };
 
+struct PixelSortUniforms {
+    int direction = 0;
+    int sortMode = 0;
+    float threshold = 0.2F;
+    int streakLength = 110;
+    float intensity = 0.7F;
+    float randomness = 0.0F;
+    bool reverse = false;
+};
+
 struct PreviewRenderSettings {
     PreviewEffect effect = PreviewEffect::Passthrough;
     RenderContext context;
@@ -68,6 +79,7 @@ struct PreviewRenderSettings {
     HalftoneUniforms halftone;
     DotsUniforms dots;
     ContourUniforms contour;
+    PixelSortUniforms pixelSort;
     bool sourceAlreadyProcessed = false;
     bool bloom = false;
     bool grain = false;
@@ -186,6 +198,7 @@ private:
     ShaderProgram halftoneShader_;
     ShaderProgram dotsShader_;
     ShaderProgram contourShader_;
+    ShaderProgram pixelSortShader_;
     ShaderProgram postShader_;
     RenderTexture preprocessTexture_;
     Framebuffer preprocessFramebuffer_;

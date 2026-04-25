@@ -15,6 +15,7 @@
 - Fixed left input/effects rail, central preview, and scrollable right settings/export rail.
 - Layout follows the ShaderLoom reference screenshots.
 - Image loading through startup path, Windows browse dialog, and drag/drop.
+- PNG, JPG, and animated GIF input.
 - Real OpenGL texture preview for loaded PNG/JPG files.
 - Preview-only zoom and pan state.
 
@@ -32,10 +33,11 @@
 
 - GPU ASCII preview using a smooth font atlas and character-set controls.
 - GPU color dithering preview for interactive slider performance.
+- GPU Pixel Sort preview for interactive slider performance.
 - Halftone, dots, and contour fragment shaders.
 - Dynamic right-panel settings for the selected GPU effect.
 - Settings structs passed to shader uniforms.
-- Pixel Sort uses a cached CPU processor uploaded back into the OpenGL preview/export pipeline.
+- Legacy CPU processors remain available for CLI paths; the editor preview keeps effects on the OpenGL path.
 - Effects list is trimmed to ASCII, Dithering, Halftone, Dots, Contour, and Pixel Sort.
 
 ## Milestone 5: Framebuffer Export
