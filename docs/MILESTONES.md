@@ -30,12 +30,13 @@
 
 ## Milestone 4: First GPU Effects
 
-- ASCII GPU shader preview with character-set controls.
+- GPU ASCII preview using a smooth font atlas and character-set controls.
+- GPU color dithering preview for interactive slider performance.
 - Halftone, dots, and contour fragment shaders.
 - Dynamic right-panel settings for the selected GPU effect.
 - Settings structs passed to shader uniforms.
-- Dithering and Pixel Sort use CPU processors uploaded back into the OpenGL preview/export pipeline.
-- Effects list is trimmed to ASCII, Dithering, Halftone, Matrix Rain, Dots, Contour, and Pixel Sort.
+- Pixel Sort uses a cached CPU processor uploaded back into the OpenGL preview/export pipeline.
+- Effects list is trimmed to ASCII, Dithering, Halftone, Dots, Contour, and Pixel Sort.
 
 ## Milestone 5: Framebuffer Export
 

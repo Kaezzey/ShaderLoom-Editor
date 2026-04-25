@@ -15,9 +15,27 @@ namespace ShaderLoom::app {
 
 enum class PreviewEffect {
     Passthrough,
+    Ascii,
+    Dither,
     Halftone,
     Dots,
     Contour
+};
+
+struct AsciiUniforms {
+    float scale = 1.0F;
+    float spacing = 0.3F;
+    int outputWidth = 0;
+    int characterSet = 3;
+    GLuint glyphAtlasTexture = 0;
+    int atlasColumns = 16;
+    int atlasRows = 6;
+};
+
+struct DitherUniforms {
+    int algorithm = 0;
+    float intensity = 0.1F;
+    bool modulation = false;
 };
 
 struct HalftoneUniforms {
@@ -25,7 +43,7 @@ struct HalftoneUniforms {
     float dotScale = 0.7F;
     float spacing = 7.0F;
     float angleDegrees = 15.0F;
-    bool invert = false;
+    bool invert = true;
 };
 
 struct DotsUniforms {
@@ -33,7 +51,7 @@ struct DotsUniforms {
     int gridType = 0;
     float size = 1.3F;
     float spacing = 18.0F;
-    bool invert = false;
+    bool invert = true;
 };
 
 struct ContourUniforms {
@@ -45,6 +63,8 @@ struct ContourUniforms {
 struct PreviewRenderSettings {
     PreviewEffect effect = PreviewEffect::Passthrough;
     RenderContext context;
+    AsciiUniforms ascii;
+    DitherUniforms dither;
     HalftoneUniforms halftone;
     DotsUniforms dots;
     ContourUniforms contour;
@@ -161,6 +181,8 @@ private:
     bool initialized_ = false;
     ShaderProgram preprocessShader_;
     ShaderProgram passthroughShader_;
+    ShaderProgram asciiShader_;
+    ShaderProgram ditherShader_;
     ShaderProgram halftoneShader_;
     ShaderProgram dotsShader_;
     ShaderProgram contourShader_;

@@ -8,13 +8,6 @@
 namespace ShaderLoom {
 namespace {
 
-struct FloatPixel {
-    float r = 0.0F;
-    float g = 0.0F;
-    float b = 0.0F;
-    float a = 1.0F;
-};
-
 struct DiffusionWeight {
     int dx = 0;
     int dy = 0;
@@ -27,16 +20,6 @@ float toFloat(std::uint8_t value) noexcept {
 
 std::uint8_t toByte(float value) noexcept {
     return static_cast<std::uint8_t>(std::lround(std::clamp(value, 0.0F, 1.0F) * 255.0F));
-}
-
-void diffuse(std::vector<FloatPixel>& pixels, int width, int height, int x, int y, float er, float eg, float eb, float factor) {
-    if (x < 0 || y < 0 || x >= width || y >= height) {
-        return;
-    }
-    FloatPixel& target = pixels[static_cast<std::size_t>(y * width + x)];
-    target.r += er * factor;
-    target.g += eg * factor;
-    target.b += eb * factor;
 }
 
 std::vector<DiffusionWeight> diffusionKernel(DitherAlgorithm algorithm) {
@@ -106,12 +89,10 @@ Image DitherEffect::apply(const Image& source, const DitherSettings& settings, c
             for (int x = 0; x < processed.width(); ++x) {
                 const Pixel original = processed.pixel(x, y);
                 const float threshold = matrix[y % 2][x % 2];
-                const float rDither = toFloat(original.r) > threshold ? 1.0F : 0.0F;
-                const float gDither = toFloat(original.g) > threshold ? 1.0F : 0.0F;
-                const float bDither = toFloat(original.b) > threshold ? 1.0F : 0.0F;
-                const float r = (toFloat(original.r) * (1.0F - blend)) + (rDither * blend);
-                const float g = (toFloat(original.g) * (1.0F - blend)) + (gDither * blend);
-                const float b = (toFloat(original.b) * (1.0F - blend)) + (bDither * blend);
+                const float mask = luminance(original) > threshold ? 1.0F : 0.0F;
+                const float r = toFloat(original.r) * ((1.0F - blend) + (mask * blend));
+                const float g = toFloat(original.g) * ((1.0F - blend) + (mask * blend));
+                const float b = toFloat(original.b) * ((1.0F - blend) + (mask * blend));
                 output.setPixel(x, y, Pixel{toByte(r), toByte(g), toByte(b), original.a});
             }
         }
@@ -119,39 +100,30 @@ Image DitherEffect::apply(const Image& source, const DitherSettings& settings, c
         return output;
     }
 
-    std::vector<FloatPixel> work(static_cast<std::size_t>(processed.width() * processed.height()));
+    std::vector<float> work(static_cast<std::size_t>(processed.width() * processed.height()));
 
     const std::vector<DiffusionWeight> kernel = diffusionKernel(settings.algorithm);
 
     for (int y = 0; y < processed.height(); ++y) {
         for (int x = 0; x < processed.width(); ++x) {
             const Pixel pixel = processed.pixel(x, y);
-            work[static_cast<std::size_t>(y * processed.width() + x)] = FloatPixel{
-                toFloat(pixel.r),
-                toFloat(pixel.g),
-                toFloat(pixel.b),
-                toFloat(pixel.a)
-            };
+            work[static_cast<std::size_t>(y * processed.width() + x)] = luminance(pixel);
         }
     }
 
     for (int y = 0; y < processed.height(); ++y) {
         for (int x = 0; x < processed.width(); ++x) {
-            FloatPixel& oldPixel = work[static_cast<std::size_t>(y * processed.width() + x)];
-            const float newR = oldPixel.r >= 0.5F ? 1.0F : 0.0F;
-            const float newG = oldPixel.g >= 0.5F ? 1.0F : 0.0F;
-            const float newB = oldPixel.b >= 0.5F ? 1.0F : 0.0F;
-
-            const float er = oldPixel.r - newR;
-            const float eg = oldPixel.g - newG;
-            const float eb = oldPixel.b - newB;
-
-            oldPixel.r = newR;
-            oldPixel.g = newG;
-            oldPixel.b = newB;
+            float& oldTone = work[static_cast<std::size_t>(y * processed.width() + x)];
+            const float newTone = oldTone >= 0.5F ? 1.0F : 0.0F;
+            const float error = oldTone - newTone;
+            oldTone = newTone;
 
             for (const DiffusionWeight& weight : kernel) {
-                diffuse(work, processed.width(), processed.height(), x + weight.dx, y + weight.dy, er, eg, eb, weight.weight);
+                const int targetX = x + weight.dx;
+                const int targetY = y + weight.dy;
+                if (targetX >= 0 && targetY >= 0 && targetX < processed.width() && targetY < processed.height()) {
+                    work[static_cast<std::size_t>(targetY * processed.width() + targetX)] += error * weight.weight;
+                }
             }
         }
     }
@@ -162,10 +134,10 @@ Image DitherEffect::apply(const Image& source, const DitherSettings& settings, c
     for (int y = 0; y < processed.height(); ++y) {
         for (int x = 0; x < processed.width(); ++x) {
             const Pixel original = processed.pixel(x, y);
-            const FloatPixel dithered = work[static_cast<std::size_t>(y * processed.width() + x)];
-            const float r = (toFloat(original.r) * (1.0F - blend)) + (dithered.r * blend);
-            const float g = (toFloat(original.g) * (1.0F - blend)) + (dithered.g * blend);
-            const float b = (toFloat(original.b) * (1.0F - blend)) + (dithered.b * blend);
+            const float mask = work[static_cast<std::size_t>(y * processed.width() + x)];
+            const float r = toFloat(original.r) * ((1.0F - blend) + (mask * blend));
+            const float g = toFloat(original.g) * ((1.0F - blend) + (mask * blend));
+            const float b = toFloat(original.b) * ((1.0F - blend) + (mask * blend));
             output.setPixel(x, y, Pixel{toByte(r), toByte(g), toByte(b), original.a});
         }
     }

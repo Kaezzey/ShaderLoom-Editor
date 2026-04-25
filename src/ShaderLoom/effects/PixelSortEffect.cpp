@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <utility>
 #include <vector>
 
@@ -62,6 +63,15 @@ float sortValue(Pixel pixel, PixelSortMode mode) noexcept {
     return luminance(pixel);
 }
 
+float hash01(int x, int y, int seed) noexcept {
+    std::uint32_t value = static_cast<std::uint32_t>(x) * 374761393U;
+    value += static_cast<std::uint32_t>(y) * 668265263U;
+    value += static_cast<std::uint32_t>(seed) * 2246822519U;
+    value = (value ^ (value >> 13U)) * 1274126177U;
+    value ^= value >> 16U;
+    return static_cast<float>(value & 0x00FFFFFFU) / static_cast<float>(0x00FFFFFFU);
+}
+
 void sortSegment(
     const Image& processed,
     Image& sorted,
@@ -70,19 +80,25 @@ void sortSegment(
 ) {
     int index = 0;
     const float threshold = std::clamp(settings.threshold, 0.0F, 1.0F);
+    const float randomness = std::clamp(settings.randomness, 0.0F, 1.0F);
     const int maxStreak = std::max(1, settings.streakLength);
 
     while (index < static_cast<int>(points.size())) {
         const auto [x, y] = points[static_cast<std::size_t>(index)];
-        if (luminance(processed.pixel(x, y)) <= threshold) {
+        const float startNoise = hash01(x, y, index);
+        const float localThreshold = std::clamp(threshold + ((startNoise - 0.5F) * randomness * 0.7F), 0.0F, 1.0F);
+        if (sortValue(processed.pixel(x, y), settings.sortMode) <= localThreshold || startNoise < randomness * 0.12F) {
             ++index;
             continue;
         }
 
         const int start = index;
+        const float streakNoise = hash01(x + 17, y + 31, start);
+        const float streakScale = 1.0F - (randomness * 0.55F) + (streakNoise * randomness * 0.9F);
+        const int localMaxStreak = std::max(1, static_cast<int>(std::round(static_cast<float>(maxStreak) * streakScale)));
         while (index < static_cast<int>(points.size())) {
             const auto [sx, sy] = points[static_cast<std::size_t>(index)];
-            if (luminance(processed.pixel(sx, sy)) <= threshold || (index - start) >= maxStreak) {
+            if (sortValue(processed.pixel(sx, sy), settings.sortMode) <= localThreshold || (index - start) >= localMaxStreak) {
                 break;
             }
             ++index;

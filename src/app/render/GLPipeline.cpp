@@ -26,6 +26,9 @@
 #ifndef GL_TEXTURE0
 #define GL_TEXTURE0 0x84C0
 #endif
+#ifndef GL_TEXTURE1
+#define GL_TEXTURE1 0x84C1
+#endif
 #ifndef GL_FRAMEBUFFER
 #define GL_FRAMEBUFFER 0x8D40
 #endif
@@ -179,6 +182,7 @@ uniform float uBrightnessMap;
 uniform float uEdgeEnhance;
 uniform float uBlur;
 uniform float uQuantizeColors;
+uniform float uShapeMatching;
 
 float luma(vec3 color) {
     return dot(color, vec3(0.299, 0.587, 0.114));
@@ -239,7 +243,7 @@ void main() {
     float gray = luma(color);
     color = mix(vec3(gray), color, 1.0 + uSaturation / 100.0);
     color = hueRotationMatrix(radians(uHueRotation)) * color;
-    color = clamp(color, 0.0, 1.0);
+    color = clamp(color, vec3(0.0), vec3(1.0));
 
     if (uSharpness > 0.001) {
         vec3 center = texture(uSource, vTexCoord).rgb;
@@ -251,11 +255,17 @@ void main() {
         color = mix(color, sharp, clamp(uSharpness / 5.0, 0.0, 1.0));
     }
 
-    color = pow(clamp(color, 0.0, 1.0), vec3(1.0 / max(uGamma, 0.01)));
+    color = pow(clamp(color, vec3(0.0), vec3(1.0)), vec3(1.0 / max(uGamma, 0.01)));
 
     float mappedLuma = max(luma(color), 0.001);
     float targetLuma = pow(mappedLuma, max(uBrightnessMap, 0.01));
     color *= targetLuma / mappedLuma;
+
+    if (uShapeMatching > 0.001) {
+        float currentLuma = max(luma(color), 0.001);
+        float shapedLuma = floor(smoothstep(0.05, 0.95, currentLuma) * 5.0 + 0.5) / 5.0;
+        color = mix(color, color * (shapedLuma / currentLuma), clamp(uShapeMatching, 0.0, 1.0));
+    }
 
     if (uEdgeEnhance > 0.001) {
         color += sobel(vTexCoord, texel) * (uEdgeEnhance / 5.0);
@@ -263,10 +273,186 @@ void main() {
 
     if (uQuantizeColors > 1.0) {
         float levels = max(uQuantizeColors - 1.0, 1.0);
-        color = floor(clamp(color, 0.0, 1.0) * levels + 0.5) / levels;
+        color = floor(clamp(color, vec3(0.0), vec3(1.0)) * levels + 0.5) / levels;
     }
 
-    fragColor = vec4(clamp(color, 0.0, 1.0), source.a);
+    fragColor = vec4(clamp(color, vec3(0.0), vec3(1.0)), source.a);
+}
+)";
+
+constexpr const char* AsciiFragmentShader = R"(
+#version 330 core
+in vec2 vTexCoord;
+out vec4 fragColor;
+uniform sampler2D uSource;
+uniform sampler2D uGlyphAtlas;
+uniform vec2 uResolution;
+uniform float uScale;
+uniform float uSpacing;
+uniform int uOutputWidth;
+uniform int uCharacterSet;
+uniform int uAtlasColumns;
+uniform int uAtlasRows;
+
+float luma(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+}
+
+int rampCount(int set) {
+    if (set == 0) { return 10; }
+    if (set == 1) { return 7; }
+    if (set == 2) { return 3; }
+    if (set == 4) { return 3; }
+    if (set == 5) { return 36; }
+    if (set == 6) { return 11; }
+    if (set == 7) { return 10; }
+    if (set == 8) { return 22; }
+    return 70;
+}
+
+int rampCode(int set, int index) {
+    if (set == 0) {
+        int data[10] = int[10](32,46,58,45,61,43,42,35,37,64);
+        return data[clamp(index, 0, 9)];
+    }
+    if (set == 1) {
+        int data[7] = int[7](32,46,111,79,48,35,64);
+        return data[clamp(index, 0, 6)];
+    }
+    if (set == 2) {
+        int data[3] = int[3](32,48,49);
+        return data[clamp(index, 0, 2)];
+    }
+    if (set == 4) {
+        int data[3] = int[3](32,46,35);
+        return data[clamp(index, 0, 2)];
+    }
+    if (set == 5) {
+        int data[36] = int[36](32,46,44,58,105,108,99,118,117,110,120,114,106,102,116,76,67,74,85,89,88,90,79,48,81,100,98,112,113,119,109,104,97,111,77,87);
+        return data[clamp(index, 0, 35)];
+    }
+    if (set == 6) {
+        int data[11] = int[11](32,49,50,51,52,53,54,55,56,57,48);
+        return data[clamp(index, 0, 10)];
+    }
+    if (set == 7) {
+        int data[10] = int[10](32,46,45,43,61,42,47,37,35,64);
+        return data[clamp(index, 0, 9)];
+    }
+    if (set == 8) {
+        int data[22] = int[22](32,46,44,58,59,33,60,62,63,47,124,92,123,125,91,93,40,41,35,36,37,64);
+        return data[clamp(index, 0, 21)];
+    }
+    int data[70] = int[70](32,46,39,96,94,34,44,58,59,73,108,33,105,62,60,126,43,95,45,63,93,91,125,123,49,41,40,124,92,47,116,102,106,114,120,110,117,118,99,122,88,89,85,74,67,76,81,48,79,90,109,119,113,112,100,98,107,104,97,111,42,35,77,87,38,56,37,66,64,36);
+    return data[clamp(index, 0, 69)];
+}
+
+void main() {
+    float cellWidth = max(4.0, 8.0 / max(uScale, 0.1));
+    float columns = uOutputWidth > 0 ? float(uOutputWidth) : clamp(floor(uResolution.x / cellWidth + 0.5), 12.0, 900.0);
+    vec2 cellSize = vec2(uResolution.x / columns);
+    cellSize.y = cellSize.x * 1.28;
+    float rows = max(1.0, floor(uResolution.y / max(cellSize.y, 1.0) + 0.5));
+    cellSize.y = uResolution.y / rows;
+
+    vec2 pixel = vTexCoord * uResolution;
+    vec2 cell = floor(pixel / cellSize);
+    vec2 cellOrigin = cell * cellSize;
+    vec2 local = (pixel - cellOrigin) / cellSize;
+    vec2 sampleUv = clamp((cellOrigin + cellSize * 0.5) / uResolution, vec2(0.0), vec2(1.0));
+    vec4 source = texture(uSource, sampleUv);
+
+    int count = rampCount(uCharacterSet);
+    int rampIndex = int(clamp(floor(luma(source.rgb) * float(count - 1) + 0.5), 0.0, float(count - 1)));
+    int code = rampCode(uCharacterSet, rampIndex);
+    int tile = clamp(code - 32, 0, 94);
+
+    float glyphScale = clamp(1.18 - (uSpacing * 0.24), 0.38, 1.22);
+    vec2 glyphUv = ((local - 0.5) / glyphScale) + 0.5;
+    if (glyphUv.x < 0.0 || glyphUv.y < 0.0 || glyphUv.x > 1.0 || glyphUv.y > 1.0) {
+        fragColor = vec4(0.0, 0.0, 0.0, source.a);
+        return;
+    }
+
+    float atlasColumns = float(max(uAtlasColumns, 1));
+    float atlasRows = float(max(uAtlasRows, 1));
+    vec2 tileUv = vec2(mod(float(tile), atlasColumns), floor(float(tile) / atlasColumns));
+    vec2 atlasUv = (tileUv + glyphUv) / vec2(atlasColumns, atlasRows);
+    float glyphAlpha = texture(uGlyphAtlas, atlasUv).a;
+    glyphAlpha = smoothstep(0.04, 0.96, glyphAlpha);
+    fragColor = vec4(source.rgb * glyphAlpha, source.a);
+}
+)";
+
+constexpr const char* DitherFragmentShader = R"(
+#version 330 core
+in vec2 vTexCoord;
+out vec4 fragColor;
+uniform sampler2D uSource;
+uniform vec2 uResolution;
+uniform int uAlgorithm;
+uniform float uIntensity;
+uniform int uModulation;
+
+float luma(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+}
+
+float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+float bayer2(vec2 p) {
+    int x = int(mod(p.x, 2.0));
+    int y = int(mod(p.y, 2.0));
+    if (x == 0 && y == 0) { return 0.25; }
+    if (x == 1 && y == 0) { return 0.75; }
+    if (x == 0 && y == 1) { return 1.0; }
+    return 0.5;
+}
+
+float bayer4(vec2 p) {
+    int x = int(mod(p.x, 4.0));
+    int y = int(mod(p.y, 4.0));
+    int index = x + y * 4;
+    int data[16] = int[16](0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5);
+    return (float(data[index]) + 0.5) / 16.0;
+}
+
+float orderedThreshold(vec2 p, int algorithm) {
+    if (algorithm == 8) {
+        return bayer2(p);
+    }
+    if (algorithm == 1) {
+        return mix(bayer4(p), hash(floor(p / 2.0)), 0.18);
+    }
+    if (algorithm == 2 || algorithm == 3) {
+        return mix(bayer4(p * 0.5), hash(floor(p)), 0.28);
+    }
+    if (algorithm == 4 || algorithm == 5) {
+        return mix(bayer4(p + vec2(p.y * 0.5, 0.0)), hash(floor(p * 0.7)), 0.18);
+    }
+    if (algorithm == 6 || algorithm == 7) {
+        return mix(bayer2(p + vec2(p.y, 0.0)), hash(floor(p)), 0.12);
+    }
+    return mix(bayer4(p), hash(floor(p + vec2(p.y * 0.37, 0.0))), 0.22);
+}
+
+void main() {
+    vec2 pixel = vTexCoord * uResolution;
+    vec4 source = texture(uSource, vTexCoord);
+    float threshold = orderedThreshold(pixel, uAlgorithm);
+    float strength = clamp(uIntensity, 0.0, 1.0);
+    float tone = luma(source.rgb);
+    if (uModulation == 1) {
+        float chroma = length(source.rgb - vec3(tone));
+        threshold = clamp(threshold + (hash(floor(pixel * 0.5)) - 0.5) * chroma * 0.35, 0.0, 1.0);
+    }
+    float bias = mix(0.08, -0.08, strength);
+    float mask = step(threshold, clamp(tone + bias, 0.0, 1.0));
+    vec3 dithered = source.rgb * mask;
+    float amount = mix(0.70, 1.0, strength);
+    fragColor = vec4(mix(source.rgb, dithered, amount), source.a);
 }
 )";
 
@@ -300,7 +486,7 @@ void main() {
     vec2 cell = floor(rotated / spacing);
     vec2 local = fract(rotated / spacing) * 2.0 - 1.0;
     vec2 samplePixel = (cell + 0.5) * spacing;
-    vec2 sampleUv = clamp((rotate2d(-uAngle) * (samplePixel - center) + center) / uResolution, 0.0, 1.0);
+    vec2 sampleUv = clamp((rotate2d(-uAngle) * (samplePixel - center) + center) / uResolution, vec2(0.0), vec2(1.0));
     vec4 source = texture(uSource, sampleUv);
     float tone = luma(source.rgb);
     if (uInvert == 1) {
@@ -315,7 +501,7 @@ void main() {
     } else if (uShape == 3) {
         distanceValue = abs(local.y);
     }
-    float edge = smoothstep(radius, radius - 0.12, distanceValue);
+    float edge = 1.0 - smoothstep(max(radius - 0.12, 0.0), radius, distanceValue);
     vec3 color = mix(vec3(0.0), source.rgb, edge);
     fragColor = vec4(color, source.a);
 }
@@ -346,7 +532,7 @@ void main() {
     }
     vec2 cell = floor(pixel / spacing);
     vec2 local = fract(pixel / spacing) * 2.0 - 1.0;
-    vec2 sampleUv = clamp(((cell + 0.5) * spacing) / uResolution, 0.0, 1.0);
+    vec2 sampleUv = clamp(((cell + 0.5) * spacing) / uResolution, vec2(0.0), vec2(1.0));
     vec4 source = texture(uSource, sampleUv);
     float tone = luma(source.rgb);
     if (uInvert == 1) {
@@ -359,7 +545,7 @@ void main() {
     } else if (uShape == 2) {
         distanceValue = abs(local.x) + abs(local.y);
     }
-    float mask = smoothstep(radius, radius - 0.08, distanceValue);
+    float mask = 1.0 - smoothstep(max(radius - 0.08, 0.0), radius, distanceValue);
     fragColor = vec4(mix(vec3(0.0), source.rgb, mask), source.a);
 }
 )";
@@ -379,7 +565,7 @@ float luma(vec3 color) {
 }
 
 float bandAt(vec2 uv, float levels) {
-    float tone = luma(texture(uSource, clamp(uv, 0.0, 1.0)).rgb);
+    float tone = luma(texture(uSource, clamp(uv, vec2(0.0), vec2(1.0))).rgb);
     if (uInvert == 1) {
         tone = 1.0 - tone;
     }
@@ -460,8 +646,8 @@ void main() {
     if (uChromatic == 1) {
         vec2 direction = normalize(uv - 0.5 + vec2(0.0001));
         vec2 offset = direction * uChromaticAmount * texel;
-        color.r = texture(uSource, clamp(uv + offset, 0.0, 1.0)).r;
-        color.b = texture(uSource, clamp(uv - offset, 0.0, 1.0)).b;
+        color.r = texture(uSource, clamp(uv + offset, vec2(0.0), vec2(1.0))).r;
+        color.b = texture(uSource, clamp(uv - offset, vec2(0.0), vec2(1.0))).b;
     }
 
     if (uBloom == 1) {
@@ -471,7 +657,7 @@ void main() {
         for (int y = -2; y <= 2; ++y) {
             for (int x = -2; x <= 2; ++x) {
                 vec2 o = vec2(float(x), float(y)) * texel * radius;
-                vec3 sampleColor = texture(uSource, clamp(uv + o, 0.0, 1.0)).rgb;
+                vec3 sampleColor = texture(uSource, clamp(uv + o, vec2(0.0), vec2(1.0))).rgb;
                 float bright = smoothstep(uBloomThreshold, uBloomThreshold + max(uBloomSoftThreshold, 0.001), luma(sampleColor));
                 bloom += sampleColor * bright;
                 total += 1.0;
@@ -504,7 +690,7 @@ void main() {
         color *= mask;
     }
 
-    fragColor = vec4(clamp(color, 0.0, 1.0), base.a);
+    fragColor = vec4(clamp(color, vec3(0.0), vec3(1.0)), base.a);
 }
 )";
 
@@ -792,6 +978,8 @@ void PreviewPipeline::initialize() {
 
     preprocessShader_.compile(PassthroughVertexShader, PreprocessFragmentShader);
     passthroughShader_.compile(PassthroughVertexShader, PassthroughFragmentShader);
+    asciiShader_.compile(PassthroughVertexShader, AsciiFragmentShader);
+    ditherShader_.compile(PassthroughVertexShader, DitherFragmentShader);
     halftoneShader_.compile(PassthroughVertexShader, HalftoneFragmentShader);
     dotsShader_.compile(PassthroughVertexShader, DotsFragmentShader);
     contourShader_.compile(PassthroughVertexShader, ContourFragmentShader);
@@ -831,6 +1019,7 @@ GLuint PreviewPipeline::render(GLuint sourceTexture, int width, int height, cons
         preprocessShader_.setFloat("uEdgeEnhance", settings.context.processing.edgeEnhance);
         preprocessShader_.setFloat("uBlur", settings.context.processing.blur);
         preprocessShader_.setFloat("uQuantizeColors", static_cast<float>(settings.context.processing.quantizeColors));
+        preprocessShader_.setFloat("uShapeMatching", settings.context.processing.shapeMatching);
         quad_.draw();
         glBindTexture(GL_TEXTURE_2D, 0);
         glUseProgramPtr(0);
@@ -847,7 +1036,11 @@ GLuint PreviewPipeline::render(GLuint sourceTexture, int width, int height, cons
     glClear(GL_COLOR_BUFFER_BIT);
 
     ShaderProgram* effectShader = &passthroughShader_;
-    if (settings.effect == PreviewEffect::Halftone) {
+    if (settings.effect == PreviewEffect::Ascii) {
+        effectShader = &asciiShader_;
+    } else if (settings.effect == PreviewEffect::Dither) {
+        effectShader = &ditherShader_;
+    } else if (settings.effect == PreviewEffect::Halftone) {
         effectShader = &halftoneShader_;
     } else if (settings.effect == PreviewEffect::Dots) {
         effectShader = &dotsShader_;
@@ -861,7 +1054,22 @@ GLuint PreviewPipeline::render(GLuint sourceTexture, int width, int height, cons
     effectShader->setInt("uSource", 0);
     effectShader->setVec2("uResolution", static_cast<float>(width), static_cast<float>(height));
 
-    if (settings.effect == PreviewEffect::Halftone) {
+    if (settings.effect == PreviewEffect::Ascii) {
+        glActiveTexturePtr(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, settings.ascii.glyphAtlasTexture);
+        glActiveTexturePtr(GL_TEXTURE0);
+        effectShader->setInt("uGlyphAtlas", 1);
+        effectShader->setFloat("uScale", settings.ascii.scale);
+        effectShader->setFloat("uSpacing", settings.ascii.spacing);
+        effectShader->setInt("uOutputWidth", settings.ascii.outputWidth);
+        effectShader->setInt("uCharacterSet", settings.ascii.characterSet);
+        effectShader->setInt("uAtlasColumns", settings.ascii.atlasColumns);
+        effectShader->setInt("uAtlasRows", settings.ascii.atlasRows);
+    } else if (settings.effect == PreviewEffect::Dither) {
+        effectShader->setInt("uAlgorithm", settings.dither.algorithm);
+        effectShader->setFloat("uIntensity", settings.dither.intensity);
+        effectShader->setInt("uModulation", settings.dither.modulation ? 1 : 0);
+    } else if (settings.effect == PreviewEffect::Halftone) {
         effectShader->setFloat("uDotScale", settings.halftone.dotScale);
         effectShader->setFloat("uSpacing", settings.halftone.spacing);
         effectShader->setFloat("uAngle", settings.halftone.angleDegrees * 0.017453292519943295F);
@@ -880,6 +1088,11 @@ GLuint PreviewPipeline::render(GLuint sourceTexture, int width, int height, cons
     }
 
     quad_.draw();
+    if (settings.effect == PreviewEffect::Ascii) {
+        glActiveTexturePtr(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glActiveTexturePtr(GL_TEXTURE0);
+    }
     glBindTexture(GL_TEXTURE_2D, 0);
     glUseProgramPtr(0);
     Framebuffer::bindDefault();
@@ -959,6 +1172,8 @@ void PreviewPipeline::reset() {
     quad_.reset();
     preprocessShader_ = ShaderProgram();
     passthroughShader_ = ShaderProgram();
+    asciiShader_ = ShaderProgram();
+    ditherShader_ = ShaderProgram();
     halftoneShader_ = ShaderProgram();
     dotsShader_ = ShaderProgram();
     contourShader_ = ShaderProgram();

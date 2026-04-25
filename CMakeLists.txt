@@ -67,6 +67,6 @@ if(ShaderLoom_BUILD_GUI)
     )
 
     if(WIN32)
-        target_link_libraries(ShaderLoom_editor PRIVATE Comdlg32)
+        target_link_libraries(ShaderLoom_editor PRIVATE Comdlg32 Gdi32)
     endif()
 endif()

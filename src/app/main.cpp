@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -28,6 +29,7 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 
 #ifndef GL_CLAMP_TO_EDGE
 #define GL_CLAMP_TO_EDGE 0x812F
@@ -56,9 +58,11 @@ struct RenderState {
     ShaderLoom::app::PreviewPipeline previewPipeline;
     GLuint previewTexture = 0;
     GLuint cpuEffectTexture = 0;
+    GLuint glyphAtlasTexture = 0;
     std::string cpuEffectCacheKey;
     std::string error;
     std::string exportStatus;
+    bool deferCpuEffectUpdate = false;
 };
 
 enum class ExportFormat {
@@ -132,6 +136,10 @@ void destroyRenderTextures(RenderState& state) {
         glDeleteTextures(1, &state.cpuEffectTexture);
         state.cpuEffectTexture = 0;
     }
+    if (state.glyphAtlasTexture != 0) {
+        glDeleteTextures(1, &state.glyphAtlasTexture);
+        state.glyphAtlasTexture = 0;
+    }
     state.cpuEffectCacheKey.clear();
 }
 
@@ -158,6 +166,110 @@ void uploadImageToTexture(GLuint& texture, const ShaderLoom::Image& image) {
     );
     glBindTexture(GL_TEXTURE_2D, 0);
 }
+
+#ifdef _WIN32
+GLuint createAsciiGlyphAtlas(int tileWidth, int tileHeight, int columns, int rows) {
+    const int atlasWidth = tileWidth * columns;
+    const int atlasHeight = tileHeight * rows;
+
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = atlasWidth;
+    info.bmiHeader.biHeight = -atlasHeight;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HDC screen = GetDC(nullptr);
+    HDC dc = CreateCompatibleDC(screen);
+    HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    ReleaseDC(nullptr, screen);
+    if (dc == nullptr || bitmap == nullptr || bits == nullptr) {
+        if (bitmap != nullptr) {
+            DeleteObject(bitmap);
+        }
+        if (dc != nullptr) {
+            DeleteDC(dc);
+        }
+        return 0;
+    }
+
+    HGDIOBJ oldBitmap = SelectObject(dc, bitmap);
+    RECT fullRect{0, 0, atlasWidth, atlasHeight};
+    HBRUSH blackBrush = CreateSolidBrush(RGB(0, 0, 0));
+    FillRect(dc, &fullRect, blackBrush);
+    DeleteObject(blackBrush);
+
+    HFONT font = CreateFontA(
+        -static_cast<int>(static_cast<float>(tileHeight) * 0.72F),
+        0,
+        0,
+        0,
+        FW_BOLD,
+        FALSE,
+        FALSE,
+        FALSE,
+        ANSI_CHARSET,
+        OUT_TT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_NATURAL_QUALITY,
+        FIXED_PITCH | FF_MODERN,
+        "Consolas"
+    );
+    HGDIOBJ oldFont = font != nullptr ? SelectObject(dc, font) : nullptr;
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(255, 255, 255));
+
+    for (int code = 32; code <= 126; ++code) {
+        const int tile = code - 32;
+        const int x = (tile % columns) * tileWidth;
+        const int y = (tile / columns) * tileHeight;
+        RECT rect{x, y, x + tileWidth, y + tileHeight};
+        const char text[2] = {static_cast<char>(code), '\0'};
+        DrawTextA(dc, text, 1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+    }
+
+    std::vector<std::uint8_t> rgba(static_cast<std::size_t>(atlasWidth * atlasHeight * 4), 0);
+    const auto* bgra = static_cast<const std::uint8_t*>(bits);
+    for (int y = 0; y < atlasHeight; ++y) {
+        for (int x = 0; x < atlasWidth; ++x) {
+            const auto source = static_cast<std::size_t>((y * atlasWidth + x) * 4);
+            const std::uint8_t alpha = std::max({bgra[source], bgra[source + 1], bgra[source + 2]});
+            rgba[source] = 255;
+            rgba[source + 1] = 255;
+            rgba[source + 2] = 255;
+            rgba[source + 3] = alpha;
+        }
+    }
+
+    if (oldFont != nullptr) {
+        SelectObject(dc, oldFont);
+    }
+    SelectObject(dc, oldBitmap);
+    if (font != nullptr) {
+        DeleteObject(font);
+    }
+    DeleteObject(bitmap);
+    DeleteDC(dc);
+
+    GLuint texture = 0;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, atlasWidth, atlasHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return texture;
+}
+#else
+GLuint createAsciiGlyphAtlas(int, int, int, int) {
+    return 0;
+}
+#endif
 
 bool loadImage(LoadedImageState& state, const std::filesystem::path& path) {
     try {
@@ -190,6 +302,12 @@ void clearImage(LoadedImageState& state) {
 }
 
 ShaderLoom::app::PreviewEffect effectForIndex(int selectedEffect) {
+    if (selectedEffect == 0) {
+        return ShaderLoom::app::PreviewEffect::Ascii;
+    }
+    if (selectedEffect == 1) {
+        return ShaderLoom::app::PreviewEffect::Dither;
+    }
     if (selectedEffect == 2) {
         return ShaderLoom::app::PreviewEffect::Halftone;
     }
@@ -203,7 +321,240 @@ ShaderLoom::app::PreviewEffect effectForIndex(int selectedEffect) {
 }
 
 bool isCpuEffect(int selectedEffect) {
-    return selectedEffect == 0 || selectedEffect == 1 || selectedEffect == 5;
+    return selectedEffect == 5;
+}
+
+const char* asciiSetName(int index) {
+    static constexpr const char* Names[] = {
+        "STANDARD",
+        "BLOCKS",
+        "BINARY",
+        "DETAILED",
+        "MINIMAL",
+        "ALPHABETIC",
+        "NUMERIC",
+        "MATH",
+        "SYMBOLS"
+    };
+    return Names[std::clamp(index, 0, static_cast<int>(std::size(Names)) - 1)];
+}
+
+using GlyphRows = std::array<std::uint8_t, 7>;
+
+GlyphRows densityGlyph(char glyph) {
+    static const std::string Ramp = " .'`^\",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
+    const std::size_t position = Ramp.find(glyph);
+    const float density = position == std::string::npos
+        ? 0.55F
+        : static_cast<float>(position) / static_cast<float>(Ramp.size() - 1);
+
+    if (density < 0.08F) {
+        return {0, 0, 0, 0, 0, 0, 0};
+    }
+    if (density < 0.20F) {
+        return {0, 0, 0, 4, 0, 0, 0};
+    }
+    if (density < 0.34F) {
+        return {0, 4, 0, 4, 0, 4, 0};
+    }
+    if (density < 0.48F) {
+        return {0, 4, 14, 4, 14, 4, 0};
+    }
+    if (density < 0.62F) {
+        return {17, 10, 4, 10, 17, 0, 0};
+    }
+    if (density < 0.76F) {
+        return {21, 10, 21, 10, 21, 10, 21};
+    }
+    if (density < 0.90F) {
+        return {31, 17, 31, 17, 31, 17, 31};
+    }
+    return {31, 31, 31, 31, 31, 31, 31};
+}
+
+GlyphRows glyphRows(char glyph) {
+    const char c = static_cast<char>(std::toupper(static_cast<unsigned char>(glyph)));
+    switch (c) {
+    case 'A': return {14, 17, 17, 31, 17, 17, 17};
+    case 'B': return {30, 17, 17, 30, 17, 17, 30};
+    case 'C': return {14, 17, 16, 16, 16, 17, 14};
+    case 'D': return {30, 17, 17, 17, 17, 17, 30};
+    case 'E': return {31, 16, 16, 30, 16, 16, 31};
+    case 'F': return {31, 16, 16, 30, 16, 16, 16};
+    case 'G': return {14, 17, 16, 23, 17, 17, 14};
+    case 'H': return {17, 17, 17, 31, 17, 17, 17};
+    case 'I': return {14, 4, 4, 4, 4, 4, 14};
+    case 'J': return {1, 1, 1, 1, 17, 17, 14};
+    case 'K': return {17, 18, 20, 24, 20, 18, 17};
+    case 'L': return {16, 16, 16, 16, 16, 16, 31};
+    case 'M': return {17, 27, 21, 21, 17, 17, 17};
+    case 'N': return {17, 25, 21, 19, 17, 17, 17};
+    case 'O': return {14, 17, 17, 17, 17, 17, 14};
+    case 'P': return {30, 17, 17, 30, 16, 16, 16};
+    case 'Q': return {14, 17, 17, 17, 21, 18, 13};
+    case 'R': return {30, 17, 17, 30, 20, 18, 17};
+    case 'S': return {15, 16, 16, 14, 1, 1, 30};
+    case 'T': return {31, 4, 4, 4, 4, 4, 4};
+    case 'U': return {17, 17, 17, 17, 17, 17, 14};
+    case 'V': return {17, 17, 17, 17, 17, 10, 4};
+    case 'W': return {17, 17, 17, 21, 21, 21, 10};
+    case 'X': return {17, 17, 10, 4, 10, 17, 17};
+    case 'Y': return {17, 17, 10, 4, 4, 4, 4};
+    case 'Z': return {31, 1, 2, 4, 8, 16, 31};
+    case '0': return {14, 17, 19, 21, 25, 17, 14};
+    case '1': return {4, 12, 4, 4, 4, 4, 14};
+    case '2': return {14, 17, 1, 2, 4, 8, 31};
+    case '3': return {30, 1, 1, 14, 1, 1, 30};
+    case '4': return {2, 6, 10, 18, 31, 2, 2};
+    case '5': return {31, 16, 16, 30, 1, 1, 30};
+    case '6': return {6, 8, 16, 30, 17, 17, 14};
+    case '7': return {31, 1, 2, 4, 8, 8, 8};
+    case '8': return {14, 17, 17, 14, 17, 17, 14};
+    case '9': return {14, 17, 17, 15, 1, 2, 12};
+    default:
+        break;
+    }
+
+    switch (glyph) {
+    case ' ': return {0, 0, 0, 0, 0, 0, 0};
+    case '.': return {0, 0, 0, 0, 0, 12, 12};
+    case ',': return {0, 0, 0, 0, 0, 12, 8};
+    case ':': return {0, 12, 12, 0, 12, 12, 0};
+    case ';': return {0, 12, 12, 0, 12, 8, 0};
+    case '\'': return {4, 4, 8, 0, 0, 0, 0};
+    case '`': return {8, 4, 0, 0, 0, 0, 0};
+    case '"': return {10, 10, 0, 0, 0, 0, 0};
+    case '^': return {4, 10, 17, 0, 0, 0, 0};
+    case '-': return {0, 0, 0, 31, 0, 0, 0};
+    case '_': return {0, 0, 0, 0, 0, 0, 31};
+    case '+': return {0, 4, 4, 31, 4, 4, 0};
+    case '=': return {0, 0, 31, 0, 31, 0, 0};
+    case '*': return {0, 21, 14, 31, 14, 21, 0};
+    case '#': return {10, 31, 10, 10, 31, 10, 0};
+    case '%': return {24, 25, 2, 4, 8, 19, 3};
+    case '@': return {14, 17, 23, 21, 23, 16, 14};
+    case '$': return {4, 15, 20, 14, 5, 30, 4};
+    case '&': return {12, 18, 20, 8, 21, 18, 13};
+    case '?': return {14, 17, 1, 2, 4, 0, 4};
+    case '!': return {4, 4, 4, 4, 4, 0, 4};
+    case '<': return {2, 4, 8, 16, 8, 4, 2};
+    case '>': return {8, 4, 2, 1, 2, 4, 8};
+    case '~': return {0, 0, 8, 21, 2, 0, 0};
+    case '|': return {4, 4, 4, 4, 4, 4, 4};
+    case '/': return {1, 2, 2, 4, 8, 8, 16};
+    case '\\': return {16, 8, 8, 4, 2, 2, 1};
+    case '[': return {14, 8, 8, 8, 8, 8, 14};
+    case ']': return {14, 2, 2, 2, 2, 2, 14};
+    case '{': return {2, 4, 4, 8, 4, 4, 2};
+    case '}': return {8, 4, 4, 2, 4, 4, 8};
+    case '(': return {2, 4, 8, 8, 8, 4, 2};
+    case ')': return {8, 4, 2, 2, 2, 4, 8};
+    default:
+        return densityGlyph(glyph);
+    }
+}
+
+bool glyphBit(const GlyphRows& rows, int x, int y) {
+    return (rows[static_cast<std::size_t>(y)] & static_cast<std::uint8_t>(1 << (4 - x))) != 0;
+}
+
+ShaderLoom::Image renderAsciiRaster(
+    const ShaderLoom::Image& source,
+    const ShaderLoom::AsciiSettings& settings,
+    const ShaderLoom::RenderContext& context
+) {
+    ShaderLoom::AsciiEffect ascii;
+    const ShaderLoom::AsciiResult result = ascii.generate(source, settings, context);
+    ShaderLoom::Image output(source.width(), source.height());
+    std::vector<std::uint8_t>& pixels = output.pixels();
+    std::fill(pixels.begin(), pixels.end(), 0);
+    for (std::size_t i = 3; i < pixels.size(); i += 4) {
+        pixels[i] = 255;
+    }
+
+    const int columns = std::max(1, result.columns);
+    const int rows = std::max(1, result.rows);
+    for (int row = 0; row < rows; ++row) {
+        const int y0 = (row * source.height()) / rows;
+        const int y1 = std::max(y0 + 1, ((row + 1) * source.height()) / rows);
+        for (int col = 0; col < columns; ++col) {
+            const int x0 = (col * source.width()) / columns;
+            const int x1 = std::max(x0 + 1, ((col + 1) * source.width()) / columns);
+            const int sampleX = std::clamp((x0 + x1) / 2, 0, source.width() - 1);
+            const int sampleY = std::clamp((y0 + y1) / 2, 0, source.height() - 1);
+            const ShaderLoom::Pixel color = ShaderLoom::applyProcessing(source.pixel(sampleX, sampleY), context);
+            const char glyph = result.lines[static_cast<std::size_t>(row)][static_cast<std::size_t>(col)];
+            const GlyphRows rowsForGlyph = glyphRows(glyph);
+            const int cellWidth = std::max(1, x1 - x0);
+            const int cellHeight = std::max(1, y1 - y0);
+            const int padX = cellWidth > 7 ? 1 : 0;
+            const int padY = cellHeight > 9 ? 1 : 0;
+            const int drawWidth = std::max(1, cellWidth - (padX * 2));
+            const int drawHeight = std::max(1, cellHeight - (padY * 2));
+
+            for (int y = y0; y < y1; ++y) {
+                if (y < y0 + padY || y >= y1 - padY) {
+                    continue;
+                }
+                const int localY = std::clamp(y - y0 - padY, 0, drawHeight - 1);
+                const int glyphY = std::clamp((localY * 7) / drawHeight, 0, 6);
+                for (int x = x0; x < x1; ++x) {
+                    if (x < x0 + padX || x >= x1 - padX) {
+                        continue;
+                    }
+                    const int localX = std::clamp(x - x0 - padX, 0, drawWidth - 1);
+                    const int glyphX = std::clamp((localX * 5) / drawWidth, 0, 4);
+                    if (!glyphBit(rowsForGlyph, glyphX, glyphY)) {
+                        continue;
+                    }
+                    const auto index = static_cast<std::size_t>((y * source.width() + x) * 4);
+                    pixels[index] = color.r;
+                    pixels[index + 1] = color.g;
+                    pixels[index + 2] = color.b;
+                    pixels[index + 3] = color.a;
+                }
+            }
+        }
+    }
+
+    return output;
+}
+
+void syncPreviewSettings(AppSettings& settings, int selectedEffect, float timeSeconds, GLuint glyphAtlasTexture) {
+    settings.ascii.characterSet = asciiSetName(settings.asciiCharacterSet);
+    settings.preview.effect = effectForIndex(selectedEffect);
+    settings.preview.context = settings.context;
+    settings.preview.sourceAlreadyProcessed = isCpuEffect(selectedEffect);
+    settings.preview.ascii.scale = settings.ascii.scale;
+    settings.preview.ascii.spacing = settings.ascii.spacing;
+    settings.preview.ascii.outputWidth = settings.ascii.outputWidth;
+    settings.preview.ascii.characterSet = settings.asciiCharacterSet;
+    settings.preview.ascii.glyphAtlasTexture = glyphAtlasTexture;
+    settings.preview.ascii.atlasColumns = 16;
+    settings.preview.ascii.atlasRows = 6;
+    settings.preview.dither.algorithm = static_cast<int>(settings.dither.algorithm);
+    settings.preview.dither.intensity = settings.dither.intensity;
+    settings.preview.dither.modulation = settings.dither.modulation;
+    settings.preview.bloom = settings.bloom;
+    settings.preview.grain = settings.grain;
+    settings.preview.chromatic = settings.chromatic;
+    settings.preview.scanlines = settings.scanlines;
+    settings.preview.vignette = settings.vignette;
+    settings.preview.crtCurve = settings.crtCurve;
+    settings.preview.phosphor = settings.phosphor;
+    settings.preview.bloomThreshold = settings.bloomThreshold;
+    settings.preview.bloomSoftThreshold = settings.bloomSoftThreshold;
+    settings.preview.bloomIntensity = settings.bloomIntensity;
+    settings.preview.bloomRadius = settings.bloomRadius;
+    settings.preview.grainIntensity = settings.grainIntensity;
+    settings.preview.grainSize = settings.grainSize;
+    settings.preview.grainSpeed = settings.grainSpeed;
+    settings.preview.chromaticAmount = settings.chromaticAmount;
+    settings.preview.scanlineIntensity = settings.scanlineIntensity;
+    settings.preview.vignetteIntensity = settings.vignetteIntensity;
+    settings.preview.crtCurveAmount = settings.crtCurveAmount;
+    settings.preview.phosphorStrength = settings.phosphorStrength;
+    settings.preview.timeSeconds = timeSeconds;
 }
 
 std::string cpuEffectCacheKey(const LoadedImageState& imageState, int selectedEffect, const AppSettings& settings) {
@@ -214,16 +565,26 @@ std::string cpuEffectCacheKey(const LoadedImageState& imageState, int selectedEf
         << settings.context.adjustments.brightness << '|'
         << settings.context.adjustments.contrast << '|'
         << settings.context.adjustments.saturation << '|'
+        << settings.context.adjustments.hueRotationDegrees << '|'
+        << settings.context.adjustments.sharpness << '|'
         << settings.context.adjustments.gamma << '|'
         << settings.context.processing.invert << '|'
         << settings.context.processing.brightnessMap << '|'
-        << settings.context.processing.quantizeColors << '|';
+        << settings.context.processing.edgeEnhance << '|'
+        << settings.context.processing.blur << '|'
+        << settings.context.processing.quantizeColors << '|'
+        << settings.context.processing.shapeMatching << '|';
 
-    if (selectedEffect == 1) {
+    if (selectedEffect == 0) {
+        key << settings.ascii.scale << '|'
+            << settings.ascii.spacing << '|'
+            << settings.ascii.outputWidth << '|'
+            << settings.ascii.characterSet << '|';
+    } else if (selectedEffect == 1) {
         key << static_cast<int>(settings.dither.algorithm) << '|'
             << settings.dither.intensity << '|'
             << settings.dither.modulation;
-    } else if (selectedEffect == 6) {
+    } else if (selectedEffect == 5) {
         key << static_cast<int>(settings.pixelSort.direction) << '|'
             << static_cast<int>(settings.pixelSort.sortMode) << '|'
             << settings.pixelSort.threshold << '|'
@@ -244,12 +605,17 @@ GLuint sourceTextureForRender(LoadedImageState& imageState, RenderState& renderS
     if (renderState.cpuEffectTexture != 0 && renderState.cpuEffectCacheKey == key) {
         return renderState.cpuEffectTexture;
     }
+    if (renderState.deferCpuEffectUpdate && renderState.cpuEffectTexture != 0) {
+        return renderState.cpuEffectTexture;
+    }
 
     ShaderLoom::Image processed = imageState.image;
-    if (selectedEffect == 1) {
+    if (selectedEffect == 0) {
+        processed = renderAsciiRaster(imageState.image, settings.ascii, settings.context);
+    } else if (selectedEffect == 1) {
         ShaderLoom::DitherEffect dither;
         processed = dither.apply(imageState.image, settings.dither, settings.context);
-    } else if (selectedEffect == 6) {
+    } else if (selectedEffect == 5) {
         ShaderLoom::PixelSortEffect pixelSort;
         processed = pixelSort.apply(imageState.image, settings.pixelSort, settings.context);
     }
@@ -550,7 +916,6 @@ void drawLeftRail(int& selectedEffect, LoadedImageState& imageState) {
         "ASCII",
         "Dithering",
         "Halftone",
-        "Matrix Rain",
         "Dots",
         "Contour",
         "Pixel Sort"
@@ -732,15 +1097,20 @@ void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedIm
     ImGui::TextDisabled("Reset");
 
     sectionTitle(effectName);
+    ImGui::PushID("effect-settings");
     if (selectedEffect == 0) {
-        valueSlider("Scale", &settings.preview.ascii.scale, 0.1F, 4.0F, "%.0f");
-        valueSlider("Spacing", &settings.preview.ascii.spacing, 0.0F, 2.0F);
-        valueSlider("Output Width", &settings.preview.ascii.outputWidth, 0.0F, 4096.0F, "%.0f");
+        valueSlider("Scale", &settings.ascii.scale, 0.1F, 4.0F, "%.1f");
+        valueSlider("Spacing", &settings.ascii.spacing, 0.0F, 2.0F);
+        float outputWidth = static_cast<float>(settings.ascii.outputWidth);
+        valueSlider("Output Width", &outputWidth, 0.0F, 4096.0F, "%.0f");
+        settings.ascii.outputWidth = static_cast<int>(std::round(outputWidth));
         const char* characterSets[] = {"STANDARD", "BLOCKS", "BINARY", "DETAILED", "MINIMAL", "ALPHABETIC", "NUMERIC", "MATH", "SYMBOLS"};
         ImGui::TextDisabled("Character Set");
         ImGui::SameLine(92.0F);
         ImGui::SetNextItemWidth(-1.0F);
-        ImGui::Combo("##ascii-character-set", &settings.preview.ascii.characterSet, characterSets, static_cast<int>(std::size(characterSets)));
+        if (ImGui::Combo("##ascii-character-set", &settings.asciiCharacterSet, characterSets, static_cast<int>(std::size(characterSets)))) {
+            settings.ascii.characterSet = asciiSetName(settings.asciiCharacterSet);
+        }
     } else if (selectedEffect == 1) {
         const char* algorithms[] = {
             "Floyd-Steinberg",
@@ -772,7 +1142,7 @@ void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedIm
         valueSlider("Spacing", &settings.preview.halftone.spacing, 2.0F, 48.0F);
         valueSlider("Angle", &settings.preview.halftone.angleDegrees, -90.0F, 90.0F, "%.0f deg");
         ImGui::Checkbox("Invert", &settings.preview.halftone.invert);
-    } else if (selectedEffect == 4) {
+    } else if (selectedEffect == 3) {
         const char* shapes[] = {"Circle", "Square", "Diamond"};
         ImGui::TextDisabled("Shape");
         ImGui::SameLine(92.0F);
@@ -786,7 +1156,7 @@ void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedIm
         valueSlider("Size", &settings.preview.dots.size, 0.05F, 2.0F);
         valueSlider("Spacing", &settings.preview.dots.spacing, 4.0F, 64.0F);
         ImGui::Checkbox("Invert", &settings.preview.dots.invert);
-    } else if (selectedEffect == 5) {
+    } else if (selectedEffect == 4) {
         const char* fillModes[] = {"Filled Bands"};
         static int fillMode = 0;
         ImGui::TextDisabled("Fill Mode");
@@ -796,7 +1166,7 @@ void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedIm
         valueSlider("Levels", &settings.preview.contour.levels, 2.0F, 32.0F, "%.0f");
         valueSlider("Line Thickness", &settings.preview.contour.lineThickness, 0.5F, 6.0F);
         ImGui::Checkbox("Invert", &settings.preview.contour.invert);
-    } else if (selectedEffect == 6) {
+    } else if (selectedEffect == 5) {
         const char* directions[] = {"Horizontal", "Vertical", "Diagonal"};
         int direction = static_cast<int>(settings.pixelSort.direction);
         ImGui::TextDisabled("Direction");
@@ -823,7 +1193,9 @@ void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedIm
     } else {
         ImGui::TextDisabled("Preview pass-through");
     }
+    ImGui::PopID();
 
+    ImGui::PushID("adjustments");
     sectionTitle("Adjustments");
     valueSlider("Brightness", &settings.context.adjustments.brightness, -100.0F, 100.0F, "%.0f");
     valueSlider("Contrast", &settings.context.adjustments.contrast, -100.0F, 100.0F, "%.0f");
@@ -833,7 +1205,9 @@ void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedIm
     }
     valueSlider(selectedEffect == 1 ? "Sharpen" : "Sharpness", &settings.context.adjustments.sharpness, 0.0F, 5.0F, "%.1f");
     valueSlider("Gamma", &settings.context.adjustments.gamma, 0.1F, 4.0F);
+    ImGui::PopID();
 
+    ImGui::PushID("color");
     sectionTitle("Color");
     const char* modes[] = {"Original", "Monochrome", "Duotone"};
     static int mode = 0;
@@ -848,8 +1222,10 @@ void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedIm
     ImGui::InputText("##background", background, sizeof(background));
     static float intensity = 1.1F;
     valueSlider("Intensity", &intensity, 0.0F, 2.0F);
+    ImGui::PopID();
 
     if (sectionToggle("Processing", settings.processingOpen)) {
+        ImGui::PushID("processing");
         ImGui::Checkbox("Invert", &settings.context.processing.invert);
         valueSlider("Brightness Map", &settings.context.processing.brightnessMap, 0.1F, 4.0F);
         valueSlider("Edge Enhance", &settings.context.processing.edgeEnhance, 0.0F, 5.0F, "%.0f");
@@ -858,9 +1234,11 @@ void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedIm
         valueSlider("Quantize Colors", &quantize, 0.0F, 32.0F, "%.0f");
         settings.context.processing.quantizeColors = static_cast<int>(std::round(quantize));
         valueSlider("Shape Matching", &settings.context.processing.shapeMatching, 0.0F, 1.0F);
+        ImGui::PopID();
     }
 
     if (sectionToggle("Post-Processing", settings.postOpen)) {
+        ImGui::PushID("post-processing");
         ImGui::Checkbox("Bloom", &settings.bloom);
         if (settings.bloom) {
             valueSlider("Threshold##bloom", &settings.bloomThreshold, 0.0F, 1.0F);
@@ -894,6 +1272,7 @@ void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedIm
         if (settings.phosphor) {
             valueSlider("Strength##phosphor", &settings.phosphorStrength, 0.0F, 1.0F);
         }
+        ImGui::PopID();
     }
 
     drawExportSection(imageState, renderState, settings);
@@ -940,13 +1319,13 @@ int main(int argc, char** argv) {
     applyShaderLoomStyle();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
+    renderState.glyphAtlasTexture = createAsciiGlyphAtlas(32, 48, 16, 6);
 
     static int selectedEffect = 0;
     const char* effects[] = {
         "ASCII",
         "Dithering",
         "Halftone",
-        "Matrix Rain",
         "Dots",
         "Contour",
         "Pixel Sort"
@@ -958,7 +1337,7 @@ int main(int argc, char** argv) {
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
-        appSettings.preview.effect = effectForIndex(selectedEffect);
+        syncPreviewSettings(appSettings, selectedEffect, static_cast<float>(glfwGetTime()), renderState.glyphAtlasTexture);
         renderPreviewPipeline(imageState, renderState, selectedEffect, appSettings);
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -976,6 +1355,7 @@ int main(int argc, char** argv) {
         drawPreview(effects[selectedEffect], imageState, renderState, centerWidth);
         ImGui::SameLine(0.0F, 0.0F);
         drawSettingsRail(effects[selectedEffect], selectedEffect, imageState, renderState, appSettings);
+        renderState.deferCpuEffectUpdate = isCpuEffect(selectedEffect) && ImGui::IsAnyItemActive();
 
         ImGui::End();
 
