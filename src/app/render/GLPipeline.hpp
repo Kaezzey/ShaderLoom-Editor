@@ -81,6 +81,7 @@ struct PreviewRenderSettings {
     ContourUniforms contour;
     PixelSortUniforms pixelSort;
     bool sourceAlreadyProcessed = false;
+    float renderScale = 1.0F;
     bool bloom = false;
     bool grain = false;
     bool chromatic = false;
@@ -184,7 +185,14 @@ private:
 class PreviewPipeline {
 public:
     void initialize();
-    GLuint render(GLuint sourceTexture, int width, int height, const PreviewRenderSettings& settings);
+    GLuint render(
+        GLuint sourceTexture,
+        int renderWidth,
+        int renderHeight,
+        int logicalWidth,
+        int logicalHeight,
+        const PreviewRenderSettings& settings
+    );
     [[nodiscard]] Image readOutputImage() const;
     [[nodiscard]] bool hasOutput() const noexcept;
     void reset();

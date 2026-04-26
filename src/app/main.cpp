@@ -40,6 +40,12 @@ namespace {
 constexpr float LeftRailWidth = 232.0F;
 constexpr float RightRailWidth = 300.0F;
 constexpr float FooterHeight = 28.0F;
+constexpr int GlyphAtlasColumns = 16;
+constexpr int GlyphAtlasRows = 7;
+constexpr int GlyphAtlasAsciiCount = 95;
+constexpr int GlyphAtlasBlockStart = GlyphAtlasAsciiCount;
+
+ImFont* gLogoFont = nullptr;
 
 struct LoadedImageState {
     ShaderLoom::Image image;
@@ -67,6 +73,7 @@ struct RenderState {
     GLuint previewTexture = 0;
     GLuint cpuEffectTexture = 0;
     GLuint glyphAtlasTexture = 0;
+    GLuint nebulaTexture = 0;
     std::string cpuEffectCacheKey;
     std::string error;
     std::string exportStatus;
@@ -87,7 +94,7 @@ struct AppSettings {
     ShaderLoom::app::PreviewRenderSettings preview;
     ShaderLoom::RenderContext context;
     ShaderLoom::AsciiSettings ascii;
-    int asciiCharacterSet = 3;
+    int asciiCharacterSet = 0;
     ShaderLoom::DitherSettings dither;
     ShaderLoom::PixelSortSettings pixelSort;
     ExportFormat exportFormat = ExportFormat::Png;
@@ -148,6 +155,10 @@ void destroyRenderTextures(RenderState& state) {
         glDeleteTextures(1, &state.glyphAtlasTexture);
         state.glyphAtlasTexture = 0;
     }
+    if (state.nebulaTexture != 0) {
+        glDeleteTextures(1, &state.nebulaTexture);
+        state.nebulaTexture = 0;
+    }
     state.cpuEffectCacheKey.clear();
 }
 
@@ -195,10 +206,113 @@ void updateTexturePixels(GLuint texture, const ShaderLoom::Image& image) {
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
+float hashNoise(int x, int y) {
+    std::uint32_t hash = static_cast<std::uint32_t>(x) * 374761393U + static_cast<std::uint32_t>(y) * 668265263U;
+    hash = (hash ^ (hash >> 13U)) * 1274126177U;
+    hash ^= hash >> 16U;
+    return static_cast<float>(hash & 0x00FFFFFFU) / 16777215.0F;
+}
+
+float smoothNoise(float x, float y) {
+    const int x0 = static_cast<int>(std::floor(x));
+    const int y0 = static_cast<int>(std::floor(y));
+    const float tx = x - static_cast<float>(x0);
+    const float ty = y - static_cast<float>(y0);
+    const float sx = tx * tx * (3.0F - 2.0F * tx);
+    const float sy = ty * ty * (3.0F - 2.0F * ty);
+    const float n00 = hashNoise(x0, y0);
+    const float n10 = hashNoise(x0 + 1, y0);
+    const float n01 = hashNoise(x0, y0 + 1);
+    const float n11 = hashNoise(x0 + 1, y0 + 1);
+    const float nx0 = n00 + (n10 - n00) * sx;
+    const float nx1 = n01 + (n11 - n01) * sx;
+    return nx0 + (nx1 - nx0) * sy;
+}
+
+float fbm(float x, float y) {
+    float value = 0.0F;
+    float amplitude = 0.5F;
+    float frequency = 1.0F;
+    for (int i = 0; i < 6; ++i) {
+        value += smoothNoise(x * frequency, y * frequency) * amplitude;
+        frequency *= 2.03F;
+        amplitude *= 0.52F;
+    }
+    return value;
+}
+
+float gaussian2(float x, float y, float cx, float cy, float sx, float sy) {
+    const float dx = (x - cx) / sx;
+    const float dy = (y - cy) / sy;
+    return std::exp(-((dx * dx) + (dy * dy)));
+}
+
+std::uint8_t colorByte(float value) {
+    return static_cast<std::uint8_t>(std::clamp(std::round(value * 255.0F), 0.0F, 255.0F));
+}
+
+GLuint createNebulaTexture() {
+    constexpr int width = 1536;
+    constexpr int height = 1024;
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width * height * 4), 255);
+
+    for (int y = 0; y < height; ++y) {
+        const float v = static_cast<float>(y) / static_cast<float>(height - 1);
+        for (int x = 0; x < width; ++x) {
+            const float u = static_cast<float>(x) / static_cast<float>(width - 1);
+            const float px = (u * 2.0F - 1.0F) * 1.5F;
+            const float py = v * 2.0F - 1.0F;
+            const float warpX = fbm((u * 2.8F) + 18.0F, (v * 2.1F) + 4.0F) - 0.5F;
+            const float warpY = fbm((u * 1.9F) - 8.0F, (v * 2.7F) + 23.0F) - 0.5F;
+            const float wx = px + warpX * 0.42F;
+            const float wy = py + warpY * 0.34F;
+            const float largeNoise = fbm((wx * 1.2F) + 6.0F, (wy * 1.2F) - 3.0F);
+            const float fineNoise = fbm((wx * 5.3F) + 41.0F, (wy * 4.7F) + 9.0F);
+            const float purpleField = gaussian2(wx, wy, -0.72F, 0.74F, 1.00F, 0.64F) + gaussian2(wx, wy, -0.16F, 0.45F, 0.92F, 0.72F) * 0.38F;
+            const float blueField = gaussian2(wx, wy, 0.62F, 0.52F, 0.92F, 0.72F) + gaussian2(wx, wy, 0.18F, -0.16F, 1.18F, 0.82F) * 0.46F;
+            const float highMist = gaussian2(wx, wy, 0.02F, -0.72F, 1.65F, 0.72F);
+            const float filament = std::pow(std::clamp(fineNoise * 1.28F + largeNoise * 0.36F - 0.58F, 0.0F, 1.0F), 2.1F);
+            const float dust = std::pow(std::clamp(largeNoise * 1.18F - 0.34F, 0.0F, 1.0F), 1.55F);
+            const float vignette = std::clamp(1.15F - std::sqrt((px * px * 0.35F) + (py * py * 0.72F)), 0.0F, 1.0F);
+
+            float r = 0.002F;
+            float g = 0.003F;
+            float b = 0.012F;
+            r += purpleField * (0.055F + dust * 0.030F) + filament * 0.040F;
+            g += blueField * (0.040F + dust * 0.026F) + highMist * 0.008F;
+            b += blueField * (0.150F + dust * 0.080F) + purpleField * 0.090F + highMist * 0.055F + filament * 0.060F;
+            r *= 0.46F + vignette * 0.78F;
+            g *= 0.42F + vignette * 0.80F;
+            b *= 0.46F + vignette * 0.86F;
+
+            const float dither = (hashNoise(x * 3 + 17, y * 5 - 11) - 0.5F) / 120.0F;
+            const auto index = static_cast<std::size_t>((y * width + x) * 4);
+            pixels[index] = colorByte(std::clamp(r + dither, 0.0F, 1.0F));
+            pixels[index + 1] = colorByte(std::clamp(g + dither, 0.0F, 1.0F));
+            pixels[index + 2] = colorByte(std::clamp(b + dither, 0.0F, 1.0F));
+            pixels[index + 3] = 255;
+        }
+    }
+
+    ShaderLoom::Image nebula(width, height, std::move(pixels));
+    GLuint texture = 0;
+    uploadImageToTexture(texture, nebula);
+    return texture;
+}
+
 #ifdef _WIN32
 GLuint createAsciiGlyphAtlas(int tileWidth, int tileHeight, int columns, int rows) {
     const int atlasWidth = tileWidth * columns;
     const int atlasHeight = tileHeight * rows;
+    std::vector<wchar_t> glyphs;
+    glyphs.reserve(static_cast<std::size_t>(GlyphAtlasAsciiCount + 4));
+    for (int code = 32; code <= 126; ++code) {
+        glyphs.push_back(static_cast<wchar_t>(code));
+    }
+    glyphs.push_back(0x2591);
+    glyphs.push_back(0x2592);
+    glyphs.push_back(0x2593);
+    glyphs.push_back(0x2588);
 
     BITMAPINFO info = {};
     info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -229,7 +343,7 @@ GLuint createAsciiGlyphAtlas(int tileWidth, int tileHeight, int columns, int row
     FillRect(dc, &fullRect, blackBrush);
     DeleteObject(blackBrush);
 
-    HFONT font = CreateFontA(
+    HFONT font = CreateFontW(
         -static_cast<int>(static_cast<float>(tileHeight) * 0.72F),
         0,
         0,
@@ -238,36 +352,31 @@ GLuint createAsciiGlyphAtlas(int tileWidth, int tileHeight, int columns, int row
         FALSE,
         FALSE,
         FALSE,
-        ANSI_CHARSET,
+        DEFAULT_CHARSET,
         OUT_TT_PRECIS,
         CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_NATURAL_QUALITY,
+        ANTIALIASED_QUALITY,
         FIXED_PITCH | FF_MODERN,
-        "Consolas"
+        L"Consolas"
     );
     HGDIOBJ oldFont = font != nullptr ? SelectObject(dc, font) : nullptr;
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, RGB(255, 255, 255));
 
-    for (int code = 32; code <= 126; ++code) {
-        const int tile = code - 32;
+    for (int tile = 0; tile < static_cast<int>(glyphs.size()); ++tile) {
         const int x = (tile % columns) * tileWidth;
         const int y = (tile / columns) * tileHeight;
         RECT rect{x, y, x + tileWidth, y + tileHeight};
-        const char text[2] = {static_cast<char>(code), '\0'};
-        DrawTextA(dc, text, 1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+        const wchar_t text[2] = {glyphs[static_cast<std::size_t>(tile)], L'\0'};
+        DrawTextW(dc, text, 1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
     }
 
-    std::vector<std::uint8_t> rgba(static_cast<std::size_t>(atlasWidth * atlasHeight * 4), 0);
+    std::vector<std::uint8_t> coverage(static_cast<std::size_t>(atlasWidth * atlasHeight), 0);
     const auto* bgra = static_cast<const std::uint8_t*>(bits);
     for (int y = 0; y < atlasHeight; ++y) {
         for (int x = 0; x < atlasWidth; ++x) {
             const auto source = static_cast<std::size_t>((y * atlasWidth + x) * 4);
-            const std::uint8_t alpha = std::max({bgra[source], bgra[source + 1], bgra[source + 2]});
-            rgba[source] = 255;
-            rgba[source + 1] = 255;
-            rgba[source + 2] = 255;
-            rgba[source + 3] = alpha;
+            coverage[static_cast<std::size_t>(y * atlasWidth + x)] = std::max({bgra[source], bgra[source + 1], bgra[source + 2]});
         }
     }
 
@@ -280,6 +389,60 @@ GLuint createAsciiGlyphAtlas(int tileWidth, int tileHeight, int columns, int row
     }
     DeleteObject(bitmap);
     DeleteDC(dc);
+
+    const int spread = std::clamp(tileHeight / 6, 8, 14);
+    const int spreadSquared = spread * spread;
+    std::vector<std::uint8_t> rgba(static_cast<std::size_t>(atlasWidth * atlasHeight * 4), 0);
+
+    constexpr std::uint8_t sdfInsideThreshold = 24;
+
+    for (int y = 0; y < atlasHeight; ++y) {
+        const int tileY = y / tileHeight;
+        const int tileMinY = tileY * tileHeight;
+        const int tileMaxY = std::min(tileMinY + tileHeight, atlasHeight);
+        for (int x = 0; x < atlasWidth; ++x) {
+            const int tileX = x / tileWidth;
+            const int tileMinX = tileX * tileWidth;
+            const int tileMaxX = std::min(tileMinX + tileWidth, atlasWidth);
+            const auto pixelIndex = static_cast<std::size_t>(y * atlasWidth + x);
+            const bool inside = coverage[pixelIndex] >= sdfInsideThreshold;
+            int nearestSquared = spreadSquared;
+
+            for (int dy = -spread; dy <= spread; ++dy) {
+                const int sampleY = y + dy;
+                if (sampleY < tileMinY || sampleY >= tileMaxY) {
+                    continue;
+                }
+                const int dySquared = dy * dy;
+                if (dySquared >= nearestSquared) {
+                    continue;
+                }
+                for (int dx = -spread; dx <= spread; ++dx) {
+                    const int sampleX = x + dx;
+                    if (sampleX < tileMinX || sampleX >= tileMaxX) {
+                        continue;
+                    }
+                    const int distanceSquared = dx * dx + dySquared;
+                    if (distanceSquared >= nearestSquared || distanceSquared > spreadSquared) {
+                        continue;
+                    }
+                    const bool sampleInside = coverage[static_cast<std::size_t>(sampleY * atlasWidth + sampleX)] >= sdfInsideThreshold;
+                    if (sampleInside != inside) {
+                        nearestSquared = distanceSquared;
+                    }
+                }
+            }
+
+            const float nearest = std::sqrt(static_cast<float>(nearestSquared));
+            const float signedDistance = inside ? nearest : -nearest;
+            const float distanceValue = std::clamp(0.5F + (signedDistance / static_cast<float>(spread * 2)), 0.0F, 1.0F);
+            const auto rgbaIndex = static_cast<std::size_t>((y * atlasWidth + x) * 4);
+            rgba[rgbaIndex] = 255;
+            rgba[rgbaIndex + 1] = 255;
+            rgba[rgbaIndex + 2] = 255;
+            rgba[rgbaIndex + 3] = static_cast<std::uint8_t>(std::round(distanceValue * 255.0F));
+        }
+    }
 
     GLuint texture = 0;
     glGenTextures(1, &texture);
@@ -390,12 +553,20 @@ bool isCpuEffect(int selectedEffect) {
     return false;
 }
 
+int maxRenderTextureSize() {
+    static const int textureSize = [] {
+        GLint value = 0;
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &value);
+        return std::max(value, 1024);
+    }();
+    return textureSize;
+}
+
 const char* asciiSetName(int index) {
     static constexpr const char* Names[] = {
         "STANDARD",
         "BLOCKS",
         "BINARY",
-        "DETAILED",
         "MINIMAL",
         "ALPHABETIC",
         "NUMERIC",
@@ -407,9 +578,9 @@ const char* asciiSetName(int index) {
 
 using GlyphRows = std::array<std::uint8_t, 7>;
 
-GlyphRows densityGlyph(char glyph) {
+GlyphRows densityGlyph(std::uint32_t glyph) {
     static const std::string Ramp = " .'`^\",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
-    const std::size_t position = Ramp.find(glyph);
+    const std::size_t position = glyph <= 0x7FU ? Ramp.find(static_cast<char>(glyph)) : std::string::npos;
     const float density = position == std::string::npos
         ? 0.55F
         : static_cast<float>(position) / static_cast<float>(Ramp.size() - 1);
@@ -438,8 +609,14 @@ GlyphRows densityGlyph(char glyph) {
     return {31, 31, 31, 31, 31, 31, 31};
 }
 
-GlyphRows glyphRows(char glyph) {
-    const char c = static_cast<char>(std::toupper(static_cast<unsigned char>(glyph)));
+GlyphRows glyphRows(std::uint32_t glyph) {
+    if (glyph == 0x2591U) { return {17, 4, 17, 4, 17, 4, 17}; }
+    if (glyph == 0x2592U) { return {21, 10, 21, 10, 21, 10, 21}; }
+    if (glyph == 0x2593U) { return {29, 23, 29, 23, 29, 23, 29}; }
+    if (glyph == 0x2588U) { return {31, 31, 31, 31, 31, 31, 31}; }
+
+    const char asciiGlyph = glyph <= 0x7FU ? static_cast<char>(glyph) : '?';
+    const char c = static_cast<char>(std::toupper(static_cast<unsigned char>(asciiGlyph)));
     switch (c) {
     case 'A': return {14, 17, 17, 31, 17, 17, 17};
     case 'B': return {30, 17, 17, 30, 17, 17, 30};
@@ -481,7 +658,7 @@ GlyphRows glyphRows(char glyph) {
         break;
     }
 
-    switch (glyph) {
+    switch (asciiGlyph) {
     case ' ': return {0, 0, 0, 0, 0, 0, 0};
     case '.': return {0, 0, 0, 0, 0, 12, 12};
     case ',': return {0, 0, 0, 0, 0, 12, 8};
@@ -549,7 +726,7 @@ ShaderLoom::Image renderAsciiRaster(
             const int sampleX = std::clamp((x0 + x1) / 2, 0, source.width() - 1);
             const int sampleY = std::clamp((y0 + y1) / 2, 0, source.height() - 1);
             const ShaderLoom::Pixel color = ShaderLoom::applyProcessing(source.pixel(sampleX, sampleY), context);
-            const char glyph = result.lines[static_cast<std::size_t>(row)][static_cast<std::size_t>(col)];
+            const std::uint32_t glyph = result.glyphCodes[static_cast<std::size_t>(row)][static_cast<std::size_t>(col)];
             const GlyphRows rowsForGlyph = glyphRows(glyph);
             const int cellWidth = std::max(1, x1 - x0);
             const int cellHeight = std::max(1, y1 - y0);
@@ -591,13 +768,14 @@ void syncPreviewSettings(AppSettings& settings, int selectedEffect, float timeSe
     settings.preview.effect = effectForIndex(selectedEffect);
     settings.preview.context = settings.context;
     settings.preview.sourceAlreadyProcessed = isCpuEffect(selectedEffect);
+    settings.preview.renderScale = std::clamp(std::round(settings.preview.renderScale), 1.0F, 4.0F);
     settings.preview.ascii.scale = settings.ascii.scale;
     settings.preview.ascii.spacing = settings.ascii.spacing;
     settings.preview.ascii.outputWidth = settings.ascii.outputWidth;
     settings.preview.ascii.characterSet = settings.asciiCharacterSet;
     settings.preview.ascii.glyphAtlasTexture = glyphAtlasTexture;
-    settings.preview.ascii.atlasColumns = 16;
-    settings.preview.ascii.atlasRows = 6;
+    settings.preview.ascii.atlasColumns = GlyphAtlasColumns;
+    settings.preview.ascii.atlasRows = GlyphAtlasRows;
     settings.preview.dither.algorithm = static_cast<int>(settings.dither.algorithm);
     settings.preview.dither.intensity = settings.dither.intensity;
     settings.preview.dither.modulation = settings.dither.modulation;
@@ -708,8 +886,17 @@ void renderPreviewPipeline(LoadedImageState& imageState, RenderState& renderStat
 
     try {
         const GLuint sourceTexture = sourceTextureForRender(imageState, renderState, selectedEffect, settings);
+        const float requestedScale = std::clamp(settings.preview.renderScale, 1.0F, 4.0F);
+        const int textureLimit = maxRenderTextureSize();
+        const float maxScaleX = static_cast<float>(textureLimit) / static_cast<float>(std::max(imageState.image.width(), 1));
+        const float maxScaleY = static_cast<float>(textureLimit) / static_cast<float>(std::max(imageState.image.height(), 1));
+        const float effectiveScale = std::max(1.0F, std::min({requestedScale, maxScaleX, maxScaleY}));
+        const int renderWidth = std::max(1, static_cast<int>(std::round(static_cast<float>(imageState.image.width()) * effectiveScale)));
+        const int renderHeight = std::max(1, static_cast<int>(std::round(static_cast<float>(imageState.image.height()) * effectiveScale)));
         renderState.previewTexture = renderState.previewPipeline.render(
             sourceTexture,
+            renderWidth,
+            renderHeight,
             imageState.image.width(),
             imageState.image.height(),
             settings.preview
@@ -824,6 +1011,22 @@ void dropCallback(GLFWwindow* window, int count, const char** paths) {
     loadImage(*state, std::filesystem::path(paths[0]));
 }
 
+void loadShaderLoomFonts() {
+    ImGuiIO& io = ImGui::GetIO();
+    ImFont* uiFont = nullptr;
+#ifdef _WIN32
+    uiFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 14.0F);
+    gLogoFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\bahnschrift.ttf", 30.0F);
+#endif
+    if (uiFont == nullptr) {
+        uiFont = io.Fonts->AddFontDefault();
+    }
+    io.FontDefault = uiFont;
+    if (gLogoFont == nullptr) {
+        gLogoFont = uiFont;
+    }
+}
+
 void applyShaderLoomStyle() {
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = 0.0F;
@@ -839,23 +1042,76 @@ void applyShaderLoomStyle() {
     style.FramePadding = ImVec2(6.0F, 4.0F);
 
     ImVec4* colors = style.Colors;
-    colors[ImGuiCol_Text] = ImVec4(0.82F, 0.84F, 0.86F, 1.0F);
-    colors[ImGuiCol_TextDisabled] = ImVec4(0.32F, 0.34F, 0.36F, 1.0F);
-    colors[ImGuiCol_WindowBg] = ImVec4(0.045F, 0.047F, 0.047F, 1.0F);
-    colors[ImGuiCol_ChildBg] = ImVec4(0.055F, 0.057F, 0.057F, 1.0F);
-    colors[ImGuiCol_Border] = ImVec4(0.13F, 0.14F, 0.14F, 1.0F);
-    colors[ImGuiCol_FrameBg] = ImVec4(0.035F, 0.037F, 0.037F, 1.0F);
-    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.10F, 0.11F, 0.11F, 1.0F);
-    colors[ImGuiCol_FrameBgActive] = ImVec4(0.13F, 0.14F, 0.14F, 1.0F);
-    colors[ImGuiCol_Button] = ImVec4(0.055F, 0.057F, 0.057F, 1.0F);
-    colors[ImGuiCol_ButtonHovered] = ImVec4(0.12F, 0.13F, 0.13F, 1.0F);
-    colors[ImGuiCol_ButtonActive] = ImVec4(0.18F, 0.19F, 0.19F, 1.0F);
-    colors[ImGuiCol_CheckMark] = ImVec4(0.76F, 0.78F, 0.80F, 1.0F);
-    colors[ImGuiCol_SliderGrab] = ImVec4(0.70F, 0.72F, 0.74F, 1.0F);
-    colors[ImGuiCol_SliderGrabActive] = ImVec4(0.88F, 0.90F, 0.92F, 1.0F);
-    colors[ImGuiCol_Header] = ImVec4(0.08F, 0.09F, 0.09F, 1.0F);
-    colors[ImGuiCol_HeaderHovered] = ImVec4(0.11F, 0.12F, 0.12F, 1.0F);
-    colors[ImGuiCol_HeaderActive] = ImVec4(0.14F, 0.15F, 0.15F, 1.0F);
+    colors[ImGuiCol_Text] = ImVec4(0.86F, 0.91F, 1.0F, 1.0F);
+    colors[ImGuiCol_TextDisabled] = ImVec4(0.38F, 0.46F, 0.58F, 1.0F);
+    colors[ImGuiCol_WindowBg] = ImVec4(0.005F, 0.012F, 0.030F, 0.96F);
+    colors[ImGuiCol_ChildBg] = ImVec4(0.010F, 0.020F, 0.045F, 0.78F);
+    colors[ImGuiCol_PopupBg] = ImVec4(0.006F, 0.012F, 0.030F, 0.96F);
+    colors[ImGuiCol_Border] = ImVec4(0.20F, 0.34F, 0.58F, 0.46F);
+    colors[ImGuiCol_FrameBg] = ImVec4(0.010F, 0.018F, 0.040F, 0.92F);
+    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.030F, 0.070F, 0.145F, 0.96F);
+    colors[ImGuiCol_FrameBgActive] = ImVec4(0.050F, 0.105F, 0.210F, 1.0F);
+    colors[ImGuiCol_Button] = ImVec4(0.020F, 0.045F, 0.090F, 0.90F);
+    colors[ImGuiCol_ButtonHovered] = ImVec4(0.070F, 0.150F, 0.280F, 0.95F);
+    colors[ImGuiCol_ButtonActive] = ImVec4(0.120F, 0.220F, 0.420F, 1.0F);
+    colors[ImGuiCol_CheckMark] = ImVec4(0.80F, 0.90F, 1.0F, 1.0F);
+    colors[ImGuiCol_SliderGrab] = ImVec4(0.52F, 0.70F, 1.0F, 1.0F);
+    colors[ImGuiCol_SliderGrabActive] = ImVec4(0.92F, 0.96F, 1.0F, 1.0F);
+    colors[ImGuiCol_Header] = ImVec4(0.025F, 0.055F, 0.110F, 0.86F);
+    colors[ImGuiCol_HeaderHovered] = ImVec4(0.060F, 0.120F, 0.230F, 0.95F);
+    colors[ImGuiCol_HeaderActive] = ImVec4(0.100F, 0.190F, 0.360F, 1.0F);
+    colors[ImGuiCol_Separator] = ImVec4(0.16F, 0.28F, 0.46F, 0.48F);
+    colors[ImGuiCol_SeparatorHovered] = ImVec4(0.34F, 0.52F, 0.88F, 0.78F);
+    colors[ImGuiCol_SeparatorActive] = ImVec4(0.56F, 0.72F, 1.0F, 1.0F);
+}
+
+void drawPs2Backdrop(ImDrawList* drawList, const ImVec2& min, const ImVec2& size, float time, float intensity, GLuint texture) {
+    (void)time;
+    const ImVec2 max(min.x + size.x, min.y + size.y);
+    if (texture != 0) {
+        drawList->AddImage(static_cast<ImTextureID>(texture), min, max);
+    } else {
+        drawList->AddRectFilledMultiColor(
+            min,
+            max,
+            IM_COL32(0, 0, 5, 255),
+            IM_COL32(3, 2, 18, 255),
+            IM_COL32(5, 12, 36, 255),
+            IM_COL32(18, 5, 32, 255)
+        );
+    }
+
+    (void)intensity;
+}
+
+void drawPanelAtmosphere(ImDrawList* drawList, const ImVec2& min, const ImVec2& size) {
+    const ImVec2 max(min.x + size.x, min.y + size.y);
+    drawList->AddRectFilledMultiColor(
+        min,
+        max,
+        IM_COL32(4, 12, 30, 196),
+        IM_COL32(2, 8, 22, 210),
+        IM_COL32(0, 3, 11, 232),
+        IM_COL32(1, 7, 19, 220)
+    );
+    drawList->AddRect(min, max, IM_COL32(52, 88, 150, 92));
+    drawList->AddLine(ImVec2(max.x - 1.0F, min.y), ImVec2(max.x - 1.0F, max.y), IM_COL32(112, 154, 226, 44), 1.0F);
+}
+
+void drawShaderLoomWordmark(ImDrawList* drawList, const ImVec2& pos, float size) {
+    const char* text = "ShaderLoom";
+    ImFont* font = gLogoFont != nullptr ? gLogoFont : ImGui::GetFont();
+    drawList->AddText(font, size, ImVec2(pos.x - 2.0F, pos.y + 2.0F), IM_COL32(0, 0, 0, 180), text);
+    drawList->AddText(font, size, ImVec2(pos.x - 1.0F, pos.y), IM_COL32(72, 124, 255, 46), text);
+    drawList->AddText(font, size, ImVec2(pos.x + 1.0F, pos.y), IM_COL32(72, 124, 255, 46), text);
+    drawList->AddText(font, size, pos, IM_COL32(232, 242, 255, 245), text);
+    const ImVec2 extent = font->CalcTextSizeA(size, 10000.0F, 0.0F, text);
+    drawList->AddLine(
+        ImVec2(pos.x + 2.0F, pos.y + extent.y + 2.0F),
+        ImVec2(pos.x + extent.x - 2.0F, pos.y + extent.y + 2.0F),
+        IM_COL32(84, 120, 255, 125),
+        1.0F
+    );
 }
 
 void sectionTitle(const char* title) {
@@ -946,7 +1202,10 @@ void exportRenderedImage(const LoadedImageState& imageState, RenderState& render
 
 void drawLeftRail(int& selectedEffect, LoadedImageState& imageState) {
     ImGui::BeginChild("left-rail", ImVec2(LeftRailWidth, 0.0F), true);
-    ImGui::TextUnformatted("ShaderLoom");
+    drawPanelAtmosphere(ImGui::GetWindowDrawList(), ImGui::GetWindowPos(), ImGui::GetWindowSize());
+    ImGui::SetCursorPos(ImVec2(14.0F, 13.0F));
+    drawShaderLoomWordmark(ImGui::GetWindowDrawList(), ImGui::GetCursorScreenPos(), 23.0F);
+    ImGui::Dummy(ImVec2(1.0F, 34.0F));
     ImGui::Separator();
 
     sectionTitle("- Input");
@@ -1011,13 +1270,13 @@ void drawLeftRail(int& selectedEffect, LoadedImageState& imageState) {
     ImGui::EndChild();
 }
 
-void drawPreview(const char* effectName, LoadedImageState& imageState, RenderState& renderState, float width) {
+void drawPreview(const char* effectName, LoadedImageState& imageState, RenderState& renderState, float width, float timeSeconds) {
     ImGui::BeginChild("preview", ImVec2(width, 0.0F), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     const ImVec2 previewMin = ImGui::GetWindowPos();
     const ImVec2 previewSize = ImGui::GetWindowSize();
     ImDrawList* drawList = ImGui::GetWindowDrawList();
 
-    drawList->AddRectFilled(previewMin, ImVec2(previewMin.x + previewSize.x, previewMin.y + previewSize.y), IM_COL32(4, 5, 5, 255));
+    drawPs2Backdrop(drawList, previewMin, previewSize, timeSeconds, 1.0F, renderState.nebulaTexture);
 
     const std::string title = std::string(effectName) + (imageState.hasImage() ? " [OPENGL]" : " [READY]");
     const ImVec2 titleSize = ImGui::CalcTextSize(title.c_str());
@@ -1064,7 +1323,9 @@ void drawPreview(const char* effectName, LoadedImageState& imageState, RenderSta
         const ImVec2 imageMax(imageMin.x + imageWidth, imageMin.y + imageHeight);
         const GLuint previewTexture = renderState.previewTexture != 0 ? renderState.previewTexture : imageState.texture;
 
-        drawList->AddRectFilled(imageMin, imageMax, IM_COL32(10, 11, 11, 255));
+        drawList->AddRectFilled(ImVec2(imageMin.x - 6.0F, imageMin.y - 6.0F), ImVec2(imageMax.x + 6.0F, imageMax.y + 6.0F), IM_COL32(2, 7, 18, 180));
+        drawList->AddRect(ImVec2(imageMin.x - 6.0F, imageMin.y - 6.0F), ImVec2(imageMax.x + 6.0F, imageMax.y + 6.0F), IM_COL32(74, 118, 205, 100));
+        drawList->AddRectFilled(imageMin, imageMax, IM_COL32(2, 4, 9, 255));
         drawList->AddImage(
             static_cast<ImTextureID>(previewTexture),
             imageMin,
@@ -1084,12 +1345,12 @@ void drawPreview(const char* effectName, LoadedImageState& imageState, RenderSta
     } else {
         const ImVec2 emptyMin(contentMin.x + 36.0F, contentMin.y + 72.0F);
         const ImVec2 emptyMax(contentMax.x - 36.0F, contentMax.y - 72.0F);
-        drawList->AddRect(emptyMin, emptyMax, IM_COL32(28, 30, 30, 255));
+        drawList->AddRect(emptyMin, emptyMax, IM_COL32(46, 58, 102, 42));
         const char* emptyText = "Drop a PNG, JPG, or GIF here";
         const ImVec2 emptyTextSize = ImGui::CalcTextSize(emptyText);
         drawList->AddText(
             ImVec2((emptyMin.x + emptyMax.x - emptyTextSize.x) * 0.5F, (emptyMin.y + emptyMax.y - emptyTextSize.y) * 0.5F),
-            IM_COL32(92, 96, 100, 255),
+            IM_COL32(90, 104, 142, 210),
             emptyText
         );
     }
@@ -1165,6 +1426,7 @@ void drawExportSection(const LoadedImageState& imageState, RenderState& renderSt
 
 void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedImageState& imageState, RenderState& renderState, AppSettings& settings) {
     ImGui::BeginChild("settings-rail", ImVec2(RightRailWidth, 0.0F), true);
+    drawPanelAtmosphere(ImGui::GetWindowDrawList(), ImGui::GetWindowPos(), ImGui::GetWindowSize());
     ImGui::TextUnformatted("- Settings");
     ImGui::SameLine(RightRailWidth - 56.0F);
     ImGui::TextDisabled("Reset");
@@ -1177,7 +1439,7 @@ void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedIm
         float outputWidth = static_cast<float>(settings.ascii.outputWidth);
         valueSlider("Output Width", &outputWidth, 0.0F, 4096.0F, "%.0f");
         settings.ascii.outputWidth = static_cast<int>(std::round(outputWidth));
-        const char* characterSets[] = {"STANDARD", "BLOCKS", "BINARY", "DETAILED", "MINIMAL", "ALPHABETIC", "NUMERIC", "MATH", "SYMBOLS"};
+        const char* characterSets[] = {"STANDARD", "BLOCKS", "BINARY", "MINIMAL", "ALPHABETIC", "NUMERIC", "MATH", "SYMBOLS"};
         ImGui::TextDisabled("Character Set");
         ImGui::SameLine(92.0F);
         ImGui::SetNextItemWidth(-1.0F);
@@ -1299,6 +1561,8 @@ void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedIm
 
     if (sectionToggle("Processing", settings.processingOpen)) {
         ImGui::PushID("processing");
+        valueSlider("Render Scale", &settings.preview.renderScale, 1.0F, 4.0F, "%.0fx");
+        settings.preview.renderScale = std::clamp(std::round(settings.preview.renderScale), 1.0F, 4.0F);
         ImGui::Checkbox("Invert", &settings.context.processing.invert);
         valueSlider("Brightness Map", &settings.context.processing.brightnessMap, 0.1F, 4.0F);
         valueSlider("Edge Enhance", &settings.context.processing.edgeEnhance, 0.0F, 5.0F, "%.0f");
@@ -1389,10 +1653,12 @@ int main(int argc, char** argv) {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    loadShaderLoomFonts();
     applyShaderLoomStyle();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
-    renderState.glyphAtlasTexture = createAsciiGlyphAtlas(32, 48, 16, 6);
+    renderState.glyphAtlasTexture = createAsciiGlyphAtlas(48, 72, GlyphAtlasColumns, GlyphAtlasRows);
+    renderState.nebulaTexture = createNebulaTexture();
 
     static int selectedEffect = 0;
     const char* effects[] = {
@@ -1423,11 +1689,12 @@ int main(int argc, char** argv) {
         ImGui::SetNextWindowPos(viewport->WorkPos);
         ImGui::SetNextWindowSize(viewport->WorkSize);
         ImGui::Begin("ShaderLoomRoot", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBringToFrontOnFocus);
+        drawPs2Backdrop(ImGui::GetWindowDrawList(), viewport->WorkPos, viewport->WorkSize, static_cast<float>(now), 0.72F, renderState.nebulaTexture);
 
         const float centerWidth = std::max(320.0F, viewport->WorkSize.x - LeftRailWidth - RightRailWidth);
         drawLeftRail(selectedEffect, imageState);
         ImGui::SameLine(0.0F, 0.0F);
-        drawPreview(effects[selectedEffect], imageState, renderState, centerWidth);
+        drawPreview(effects[selectedEffect], imageState, renderState, centerWidth, static_cast<float>(now));
         ImGui::SameLine(0.0F, 0.0F);
         drawSettingsRail(effects[selectedEffect], selectedEffect, imageState, renderState, appSettings);
         renderState.deferCpuEffectUpdate = isCpuEffect(selectedEffect) && ImGui::IsAnyItemActive();
@@ -1439,7 +1706,7 @@ int main(int argc, char** argv) {
         int displayHeight = 0;
         glfwGetFramebufferSize(window, &displayWidth, &displayHeight);
         glViewport(0, 0, displayWidth, displayHeight);
-        glClearColor(0.08F, 0.08F, 0.09F, 1.0F);
+        glClearColor(0.0F, 0.006F, 0.018F, 1.0F);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(window);

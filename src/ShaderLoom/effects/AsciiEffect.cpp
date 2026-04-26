@@ -8,6 +8,31 @@
 namespace ShaderLoom {
 namespace {
 
+std::string utf8ForCodepoint(std::uint32_t codepoint) {
+    if (codepoint <= 0x7FU) {
+        return std::string(1, static_cast<char>(codepoint));
+    }
+    if (codepoint <= 0x7FFU) {
+        return std::string{
+            static_cast<char>(0xC0U | ((codepoint >> 6U) & 0x1FU)),
+            static_cast<char>(0x80U | (codepoint & 0x3FU))
+        };
+    }
+    if (codepoint <= 0xFFFFU) {
+        return std::string{
+            static_cast<char>(0xE0U | ((codepoint >> 12U) & 0x0FU)),
+            static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3FU)),
+            static_cast<char>(0x80U | (codepoint & 0x3FU))
+        };
+    }
+    return std::string{
+        static_cast<char>(0xF0U | ((codepoint >> 18U) & 0x07U)),
+        static_cast<char>(0x80U | ((codepoint >> 12U) & 0x3FU)),
+        static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3FU)),
+        static_cast<char>(0x80U | (codepoint & 0x3FU))
+    };
+}
+
 std::string escapeSvg(char glyph) {
     switch (glyph) {
     case '&':
@@ -23,10 +48,19 @@ std::string escapeSvg(char glyph) {
     }
 }
 
+std::string escapeSvg(const std::string& glyph) {
+    std::string escaped;
+    escaped.reserve(glyph.size());
+    for (char c : glyph) {
+        escaped += escapeSvg(c);
+    }
+    return escaped;
+}
+
 } // namespace
 
 AsciiResult AsciiEffect::generate(const Image& source, const AsciiSettings& settings, const RenderContext& context) const {
-    const std::string glyphs = glyphsFor(settings.characterSet);
+    const std::vector<AsciiGlyphToken> glyphs = glyphsFor(settings.characterSet);
     const Image processedSource = applyProcessing(source, context);
     const int maxColumns = std::max(12, std::min(source.width(), 2048));
     const int columns = settings.outputWidth > 0
@@ -45,20 +79,25 @@ AsciiResult AsciiEffect::generate(const Image& source, const AsciiSettings& sett
     result.columns = columns;
     result.rows = rows;
     result.lines.reserve(static_cast<std::size_t>(rows));
+    result.glyphCodes.reserve(static_cast<std::size_t>(rows));
 
     for (int row = 0; row < rows; ++row) {
         std::string line;
-        line.reserve(static_cast<std::size_t>(columns));
+        std::vector<std::uint32_t> lineCodes;
+        lineCodes.reserve(static_cast<std::size_t>(columns));
         for (int col = 0; col < columns; ++col) {
             const float u = (static_cast<float>(col) + 0.5F) / static_cast<float>(columns);
             const float v = (static_cast<float>(row) + 0.5F) / static_cast<float>(rows);
             const int x = std::clamp(static_cast<int>(u * source.width()), 0, source.width() - 1);
             const int y = std::clamp(static_cast<int>(v * source.height()), 0, source.height() - 1);
             const float luma = luminance(processedSource.pixel(x, y));
-            const auto glyphIndex = static_cast<std::size_t>(std::round(luma * static_cast<float>(glyphs.size() - 1)));
-            line.push_back(glyphs[std::clamp(glyphIndex, std::size_t{0}, glyphs.size() - 1)]);
+            auto glyphIndex = static_cast<std::size_t>(std::round(luma * static_cast<float>(glyphs.size() - 1)));
+            const AsciiGlyphToken& glyph = glyphs[std::clamp(glyphIndex, std::size_t{0}, glyphs.size() - 1)];
+            line += glyph.utf8;
+            lineCodes.push_back(glyph.codepoint);
         }
         result.lines.push_back(std::move(line));
+        result.glyphCodes.push_back(std::move(lineCodes));
     }
 
     return result;
@@ -93,39 +132,53 @@ void AsciiEffect::writeSvg(const AsciiResult& result, const std::filesystem::pat
         for (int col = 0; col < result.columns; ++col) {
             const float x = static_cast<float>(col) * fontSize;
             output << "<text x=\"" << x << "\" y=\"" << y << "\">"
-                   << escapeSvg(result.lines[static_cast<std::size_t>(row)][static_cast<std::size_t>(col)])
+                   << escapeSvg(utf8ForCodepoint(result.glyphCodes[static_cast<std::size_t>(row)][static_cast<std::size_t>(col)]))
                    << "</text>\n";
         }
     }
     output << "</g>\n</svg>\n";
 }
 
-std::string AsciiEffect::glyphsFor(const std::string& name) const {
+std::vector<AsciiGlyphToken> AsciiEffect::glyphsFor(const std::string& name) const {
+    auto asciiGlyphs = [](const char* ascii) {
+        std::vector<AsciiGlyphToken> glyphs;
+        for (const char* c = ascii; *c != '\0'; ++c) {
+            glyphs.push_back({static_cast<std::uint32_t>(static_cast<unsigned char>(*c)), std::string(1, *c)});
+        }
+        return glyphs;
+    };
+
     if (name == "STANDARD") {
-        return " .:-=+*#%@";
+        return asciiGlyphs(" .:-=+*#%@");
     }
     if (name == "BLOCKS") {
-        return " .oO0#@";
+        return {
+            {32U, " "},
+            {0x2591U, "\xE2\x96\x91"},
+            {0x2592U, "\xE2\x96\x92"},
+            {0x2593U, "\xE2\x96\x93"},
+            {0x2588U, "\xE2\x96\x88"}
+        };
     }
     if (name == "BINARY") {
-        return " 01";
+        return asciiGlyphs(" 01");
     }
     if (name == "MINIMAL") {
-        return " .#";
+        return asciiGlyphs(" .:-=+*#%@");
     }
     if (name == "ALPHABETIC") {
-        return " .,:ilcvunxrjftLCJUYXZO0QdbpqwmhaoMW";
+        return asciiGlyphs(".,:ilcvunxrjftLCJUYXZO0QdbpqwmhaoMW");
     }
     if (name == "NUMERIC") {
-        return " 1234567890";
+        return asciiGlyphs("1234567890");
     }
     if (name == "MATH") {
-        return " .-+=*/%#@";
+        return asciiGlyphs(".-+=*/%#@");
     }
     if (name == "SYMBOLS") {
-        return " .,:;!<>?/|\\{}[]()#$%@";
+        return asciiGlyphs(".,:;!<>?/|\\{}[]()#$%@");
     }
-    return " .'`^\",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
+    return asciiGlyphs(" .:-=+*#%@");
 }
 
 } // namespace ShaderLoom

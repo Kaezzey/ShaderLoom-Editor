@@ -18,6 +18,7 @@
 - PNG, JPG, and animated GIF input.
 - Real OpenGL texture preview for loaded PNG/JPG files.
 - Preview-only zoom and pan state.
+- PS2-era inspired visual shell with black/deep purple-blue depth, glassy rails, and a ShaderLoom wordmark.
 
 ## Milestone 3: Render Pipeline
 
@@ -31,7 +32,8 @@
 
 ## Milestone 4: First GPU Effects
 
-- GPU ASCII preview using a smooth font atlas and character-set controls.
+- GPU ASCII preview using an SDF font atlas and character-set controls.
+- Preview render-scale control for sharper zoom/export without changing effect spacing.
 - GPU color dithering preview for interactive slider performance.
 - GPU Pixel Sort preview for interactive slider performance.
 - Halftone, dots, and contour fragment shaders.

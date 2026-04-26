@@ -4,6 +4,7 @@
 #include "ShaderLoom/Processing.hpp"
 
 #include <filesystem>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,12 @@ struct AsciiResult {
     int columns = 0;
     int rows = 0;
     std::vector<std::string> lines;
+    std::vector<std::vector<std::uint32_t>> glyphCodes;
+};
+
+struct AsciiGlyphToken {
+    std::uint32_t codepoint = 32;
+    std::string utf8 = " ";
 };
 
 class AsciiEffect {
@@ -29,7 +36,7 @@ public:
     void writeSvg(const AsciiResult& result, const std::filesystem::path& path, int sourceWidth, int sourceHeight) const;
 
 private:
-    [[nodiscard]] std::string glyphsFor(const std::string& name) const;
+    [[nodiscard]] std::vector<AsciiGlyphToken> glyphsFor(const std::string& name) const;
 };
 
 } // namespace ShaderLoom

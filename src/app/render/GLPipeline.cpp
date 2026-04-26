@@ -300,51 +300,55 @@ float luma(vec3 color) {
 
 int rampCount(int set) {
     if (set == 0) { return 10; }
-    if (set == 1) { return 7; }
+    if (set == 1) { return 5; }
     if (set == 2) { return 3; }
-    if (set == 4) { return 3; }
-    if (set == 5) { return 36; }
-    if (set == 6) { return 11; }
-    if (set == 7) { return 10; }
-    if (set == 8) { return 22; }
-    return 70;
+    if (set == 3) { return 10; }
+    if (set == 4) { return 36; }
+    if (set == 5) { return 11; }
+    if (set == 6) { return 10; }
+    if (set == 7) { return 22; }
+    return 10;
 }
 
-int rampCode(int set, int index) {
+int asciiTile(int code) {
+    return clamp(code - 32, 0, 94);
+}
+
+int rampTile(int set, int index) {
     if (set == 0) {
         int data[10] = int[10](32,46,58,45,61,43,42,35,37,64);
-        return data[clamp(index, 0, 9)];
+        return asciiTile(data[clamp(index, 0, 9)]);
     }
     if (set == 1) {
-        int data[7] = int[7](32,46,111,79,48,35,64);
-        return data[clamp(index, 0, 6)];
+        int data[5] = int[5](0,95,96,97,98);
+        return data[clamp(index, 0, 4)];
     }
     if (set == 2) {
         int data[3] = int[3](32,48,49);
-        return data[clamp(index, 0, 2)];
+        return asciiTile(data[clamp(index, 0, 2)]);
+    }
+    if (set == 3) {
+        int data[10] = int[10](32,46,58,45,61,43,42,35,37,64);
+        return asciiTile(data[clamp(index, 0, 9)]);
     }
     if (set == 4) {
-        int data[3] = int[3](32,46,35);
-        return data[clamp(index, 0, 2)];
+        int data[36] = int[36](32,46,44,58,105,108,99,118,117,110,120,114,106,102,116,76,67,74,85,89,88,90,79,48,81,100,98,112,113,119,109,104,97,111,77,87);
+        return asciiTile(data[clamp(index, 0, 35)]);
     }
     if (set == 5) {
-        int data[36] = int[36](32,46,44,58,105,108,99,118,117,110,120,114,106,102,116,76,67,74,85,89,88,90,79,48,81,100,98,112,113,119,109,104,97,111,77,87);
-        return data[clamp(index, 0, 35)];
+        int data[11] = int[11](32,49,50,51,52,53,54,55,56,57,48);
+        return asciiTile(data[clamp(index, 0, 10)]);
     }
     if (set == 6) {
-        int data[11] = int[11](32,49,50,51,52,53,54,55,56,57,48);
-        return data[clamp(index, 0, 10)];
+        int data[10] = int[10](32,46,45,43,61,42,47,37,35,64);
+        return asciiTile(data[clamp(index, 0, 9)]);
     }
     if (set == 7) {
-        int data[10] = int[10](32,46,45,43,61,42,47,37,35,64);
-        return data[clamp(index, 0, 9)];
-    }
-    if (set == 8) {
         int data[22] = int[22](32,46,44,58,59,33,60,62,63,47,124,92,123,125,91,93,40,41,35,36,37,64);
-        return data[clamp(index, 0, 21)];
+        return asciiTile(data[clamp(index, 0, 21)]);
     }
-    int data[70] = int[70](32,46,39,96,94,34,44,58,59,73,108,33,105,62,60,126,43,95,45,63,93,91,125,123,49,41,40,124,92,47,116,102,106,114,120,110,117,118,99,122,88,89,85,74,67,76,81,48,79,90,109,119,113,112,100,98,107,104,97,111,42,35,77,87,38,56,37,66,64,36);
-    return data[clamp(index, 0, 69)];
+    int data[10] = int[10](32,46,58,45,61,43,42,35,37,64);
+    return asciiTile(data[clamp(index, 0, 9)]);
 }
 
 void main() {
@@ -361,11 +365,11 @@ void main() {
     vec2 local = (pixel - cellOrigin) / cellSize;
     vec2 sampleUv = clamp((cellOrigin + cellSize * 0.5) / uResolution, vec2(0.0), vec2(1.0));
     vec4 source = texture(uSource, sampleUv);
+    float sourceTone = luma(source.rgb);
 
     int count = rampCount(uCharacterSet);
-    int rampIndex = int(clamp(floor(luma(source.rgb) * float(count - 1) + 0.5), 0.0, float(count - 1)));
-    int code = rampCode(uCharacterSet, rampIndex);
-    int tile = clamp(code - 32, 0, 94);
+    int rampIndex = int(clamp(floor(sourceTone * float(count - 1) + 0.5), 0.0, float(count - 1)));
+    int tile = clamp(rampTile(uCharacterSet, rampIndex), 0, (uAtlasColumns * uAtlasRows) - 1);
 
     float glyphScale = clamp(1.18 - (uSpacing * 0.24), 0.38, 1.22);
     vec2 glyphUv = ((local - 0.5) / glyphScale) + 0.5;
@@ -377,9 +381,13 @@ void main() {
     float atlasColumns = float(max(uAtlasColumns, 1));
     float atlasRows = float(max(uAtlasRows, 1));
     vec2 tileUv = vec2(mod(float(tile), atlasColumns), floor(float(tile) / atlasColumns));
-    vec2 atlasUv = (tileUv + glyphUv) / vec2(atlasColumns, atlasRows);
-    float glyphAlpha = texture(uGlyphAtlas, atlasUv).a;
-    glyphAlpha = smoothstep(0.04, 0.96, glyphAlpha);
+    vec2 atlasGrid = vec2(atlasColumns, atlasRows);
+    vec2 tileSize = 1.0 / atlasGrid;
+    vec2 atlasTexel = 1.0 / vec2(textureSize(uGlyphAtlas, 0));
+    vec2 atlasUv = tileUv * tileSize + atlasTexel * 0.5 + glyphUv * max(tileSize - atlasTexel, vec2(0.0));
+    float distanceValue = texture(uGlyphAtlas, atlasUv).a;
+    float edgeWidth = max(fwidth(distanceValue) * 1.5, 0.003);
+    float glyphAlpha = smoothstep(0.5 - edgeWidth, 0.5 + edgeWidth, distanceValue);
     fragColor = vec4(source.rgb * glyphAlpha, source.a);
 }
 )";
@@ -594,6 +602,7 @@ in vec2 vTexCoord;
 out vec4 fragColor;
 uniform sampler2D uSource;
 uniform vec2 uResolution;
+uniform vec2 uTextureResolution;
 uniform int uDirection;
 uniform int uSortMode;
 uniform float uThreshold;
@@ -648,13 +657,6 @@ float hash(vec2 p) {
 void main() {
     vec4 source = texture(uSource, vTexCoord);
     float metric = sortMetric(source.rgb);
-    float noise = hash(floor(vTexCoord * uResolution / 8.0));
-    float threshold = clamp(uThreshold + (noise - 0.5) * clamp(uRandomness, 0.0, 1.0) * 0.55, 0.0, 1.0);
-    if (metric <= threshold) {
-        fragColor = source;
-        return;
-    }
-
     vec2 direction = vec2(1.0, 0.0);
     if (uDirection == 1) {
         direction = vec2(0.0, 1.0);
@@ -665,21 +667,40 @@ void main() {
         direction = -direction;
     }
 
-    vec2 texel = 1.0 / max(uResolution, vec2(1.0));
+    vec2 logicalResolution = max(uResolution, vec2(1.0));
+    vec2 textureResolution = max(uTextureResolution, vec2(1.0));
     float streak = clamp(float(uStreakLength), 1.0, 512.0);
-    float jitter = (noise - 0.5) * clamp(uRandomness, 0.0, 1.0) * streak * 0.35;
-    vec3 accum = source.rgb;
-    float total = 1.0;
+    vec2 logicalPixel = vTexCoord * logicalResolution;
+    vec2 perpendicular = vec2(-direction.y, direction.x);
+    float along = dot(logicalPixel, direction);
+    float line = dot(logicalPixel, perpendicular);
+    float segment = floor(along / max(streak * 0.65, 16.0));
+    float noise = hash(vec2(floor(line), segment));
+    float threshold = clamp(uThreshold, 0.0, 1.0);
+
+    vec2 texel = 1.0 / textureResolution;
+    vec2 resolutionScale = textureResolution / logicalResolution;
+    float pixelScale = length(direction * resolutionScale);
+    float streakPixels = max(streak * pixelScale, 1.0);
+    float randomAmount = clamp(uRandomness, 0.0, 1.0);
+    float localStreakPixels = streakPixels * mix(1.0, mix(0.55, 1.45, noise), randomAmount);
+    float jitter = (noise - 0.5) * randomAmount * localStreakPixels * 0.18;
+    vec3 accum = vec3(0.0);
+    float total = 0.0;
     vec3 best = source.rgb;
     float bestMetric = metric;
+    int sampleCount = int(clamp(ceil(localStreakPixels / 8.0), 12.0, 64.0));
 
-    for (int i = 1; i <= 24; ++i) {
-        float t = float(i) / 24.0;
-        float distancePx = t * streak + jitter;
+    for (int i = 1; i <= 64; ++i) {
+        if (i > sampleCount) {
+            break;
+        }
+        float t = float(i - 1) / max(float(sampleCount - 1), 1.0);
+        float distancePx = t * localStreakPixels + jitter;
         vec2 uv = clamp(vTexCoord - direction * texel * distancePx, vec2(0.0), vec2(1.0));
         vec3 sampleColor = texture(uSource, uv).rgb;
         float sampleMetric = sortMetric(sampleColor);
-        float gate = smoothstep(threshold, threshold + 0.18, sampleMetric);
+        float gate = smoothstep(threshold - 0.03, threshold + 0.15, sampleMetric);
         accum += sampleColor * gate;
         total += gate;
         if ((uReverse == 0 && sampleMetric > bestMetric) || (uReverse == 1 && sampleMetric < bestMetric)) {
@@ -688,9 +709,10 @@ void main() {
         }
     }
 
-    vec3 smeared = accum / max(total, 1.0);
+    vec3 smeared = total > 0.001 ? accum / total : source.rgb;
     vec3 sortedColor = mix(smeared, best, 0.45);
-    fragColor = vec4(mix(source.rgb, sortedColor, clamp(uIntensity, 0.0, 1.0)), source.a);
+    float streakMask = smoothstep(0.05, 0.55, total / max(float(sampleCount), 1.0));
+    fragColor = vec4(mix(source.rgb, sortedColor, clamp(uIntensity, 0.0, 1.0) * streakMask), source.a);
 }
 )";
 
@@ -1095,17 +1117,28 @@ void PreviewPipeline::initialize() {
     initialized_ = true;
 }
 
-GLuint PreviewPipeline::render(GLuint sourceTexture, int width, int height, const PreviewRenderSettings& settings) {
+GLuint PreviewPipeline::render(
+    GLuint sourceTexture,
+    int renderWidth,
+    int renderHeight,
+    int logicalWidth,
+    int logicalHeight,
+    const PreviewRenderSettings& settings
+) {
     initialize();
+    const int outputWidth = std::max(1, renderWidth);
+    const int outputHeight = std::max(1, renderHeight);
+    const int logicalRenderWidth = std::max(1, logicalWidth);
+    const int logicalRenderHeight = std::max(1, logicalHeight);
     const GLuint effectSourceTexture = [&]() {
         if (settings.sourceAlreadyProcessed) {
             return sourceTexture;
         }
 
-        preprocessTexture_.resize(width, height);
+        preprocessTexture_.resize(outputWidth, outputHeight);
         preprocessFramebuffer_.attach(preprocessTexture_);
         preprocessFramebuffer_.bind();
-        glViewport(0, 0, width, height);
+        glViewport(0, 0, outputWidth, outputHeight);
         glDisable(GL_BLEND);
         glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -1114,7 +1147,7 @@ GLuint PreviewPipeline::render(GLuint sourceTexture, int width, int height, cons
         glActiveTexturePtr(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, sourceTexture);
         preprocessShader_.setInt("uSource", 0);
-        preprocessShader_.setVec2("uResolution", static_cast<float>(width), static_cast<float>(height));
+        preprocessShader_.setVec2("uResolution", static_cast<float>(logicalRenderWidth), static_cast<float>(logicalRenderHeight));
         preprocessShader_.setInt("uInvert", settings.context.processing.invert ? 1 : 0);
         preprocessShader_.setFloat("uBrightness", settings.context.adjustments.brightness);
         preprocessShader_.setFloat("uContrast", settings.context.adjustments.contrast);
@@ -1134,10 +1167,10 @@ GLuint PreviewPipeline::render(GLuint sourceTexture, int width, int height, cons
         return preprocessTexture_.id();
     }();
 
-    effectTexture_.resize(width, height);
+    effectTexture_.resize(outputWidth, outputHeight);
     effectFramebuffer_.attach(effectTexture_);
     effectFramebuffer_.bind();
-    glViewport(0, 0, width, height);
+    glViewport(0, 0, outputWidth, outputHeight);
     glDisable(GL_BLEND);
     glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -1161,7 +1194,7 @@ GLuint PreviewPipeline::render(GLuint sourceTexture, int width, int height, cons
     glActiveTexturePtr(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, effectSourceTexture);
     effectShader->setInt("uSource", 0);
-    effectShader->setVec2("uResolution", static_cast<float>(width), static_cast<float>(height));
+    effectShader->setVec2("uResolution", static_cast<float>(logicalRenderWidth), static_cast<float>(logicalRenderHeight));
 
     if (settings.effect == PreviewEffect::Ascii) {
         glActiveTexturePtr(GL_TEXTURE1);
@@ -1202,6 +1235,7 @@ GLuint PreviewPipeline::render(GLuint sourceTexture, int width, int height, cons
         effectShader->setFloat("uIntensity", settings.pixelSort.intensity);
         effectShader->setFloat("uRandomness", settings.pixelSort.randomness);
         effectShader->setInt("uReverse", settings.pixelSort.reverse ? 1 : 0);
+        effectShader->setVec2("uTextureResolution", static_cast<float>(outputWidth), static_cast<float>(outputHeight));
     }
 
     quad_.draw();
@@ -1214,10 +1248,10 @@ GLuint PreviewPipeline::render(GLuint sourceTexture, int width, int height, cons
     glUseProgramPtr(0);
     Framebuffer::bindDefault();
 
-    outputTexture_.resize(width, height);
+    outputTexture_.resize(outputWidth, outputHeight);
     outputFramebuffer_.attach(outputTexture_);
     outputFramebuffer_.bind();
-    glViewport(0, 0, width, height);
+    glViewport(0, 0, outputWidth, outputHeight);
     glDisable(GL_BLEND);
     glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -1225,7 +1259,7 @@ GLuint PreviewPipeline::render(GLuint sourceTexture, int width, int height, cons
     glActiveTexturePtr(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, effectTexture_.id());
     postShader_.setInt("uSource", 0);
-    postShader_.setVec2("uResolution", static_cast<float>(width), static_cast<float>(height));
+    postShader_.setVec2("uResolution", static_cast<float>(logicalRenderWidth), static_cast<float>(logicalRenderHeight));
     postShader_.setFloat("uTime", settings.timeSeconds);
     postShader_.setInt("uBloom", settings.bloom ? 1 : 0);
     postShader_.setInt("uGrain", settings.grain ? 1 : 0);
