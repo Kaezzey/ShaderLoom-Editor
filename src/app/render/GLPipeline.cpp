@@ -302,11 +302,12 @@ int rampCount(int set) {
     if (set == 0) { return 10; }
     if (set == 1) { return 5; }
     if (set == 2) { return 3; }
-    if (set == 3) { return 10; }
-    if (set == 4) { return 36; }
-    if (set == 5) { return 11; }
-    if (set == 6) { return 10; }
-    if (set == 7) { return 22; }
+    if (set == 3) { return 67; }
+    if (set == 4) { return 10; }
+    if (set == 5) { return 36; }
+    if (set == 6) { return 11; }
+    if (set == 7) { return 10; }
+    if (set == 8) { return 22; }
     return 10;
 }
 
@@ -325,25 +326,29 @@ int rampTile(int set, int index) {
     }
     if (set == 2) {
         int data[3] = int[3](32,48,49);
-        return asciiTile(data[clamp(index, 0, 2)]);
+        return asciiTile(data[clamp(index, 1, 2)]);
     }
     if (set == 3) {
+        int data[67] = int[67](32,46,94,34,44,58,59,73,108,33,105,62,60,126,43,45,63,93,91,125,123,49,41,40,124,92,47,116,102,106,114,120,110,117,118,99,122,88,89,85,74,67,76,81,48,79,90,109,119,113,112,100,98,107,104,97,111,42,35,77,87,38,56,37,66,64,36);
+        return asciiTile(data[clamp(index, 0, 66)]);
+    }
+    if (set == 4) {
         int data[10] = int[10](32,46,58,45,61,43,42,35,37,64);
         return asciiTile(data[clamp(index, 0, 9)]);
     }
-    if (set == 4) {
+    if (set == 5) {
         int data[36] = int[36](32,46,44,58,105,108,99,118,117,110,120,114,106,102,116,76,67,74,85,89,88,90,79,48,81,100,98,112,113,119,109,104,97,111,77,87);
         return asciiTile(data[clamp(index, 0, 35)]);
     }
-    if (set == 5) {
+    if (set == 6) {
         int data[11] = int[11](32,49,50,51,52,53,54,55,56,57,48);
         return asciiTile(data[clamp(index, 0, 10)]);
     }
-    if (set == 6) {
+    if (set == 7) {
         int data[10] = int[10](32,46,45,43,61,42,47,37,35,64);
         return asciiTile(data[clamp(index, 0, 9)]);
     }
-    if (set == 7) {
+    if (set == 8) {
         int data[22] = int[22](32,46,44,58,59,33,60,62,63,47,124,92,123,125,91,93,40,41,35,36,37,64);
         return asciiTile(data[clamp(index, 0, 21)]);
     }
@@ -369,6 +374,9 @@ void main() {
 
     int count = rampCount(uCharacterSet);
     int rampIndex = int(clamp(floor(sourceTone * float(count - 1) + 0.5), 0.0, float(count - 1)));
+    if ((uCharacterSet == 2 || uCharacterSet == 3) && rampIndex == 0) {
+        rampIndex = 1;
+    }
     int tile = clamp(rampTile(uCharacterSet, rampIndex), 0, (uAtlasColumns * uAtlasRows) - 1);
 
     float glyphScale = clamp(1.18 - (uSpacing * 0.24), 0.38, 1.22);

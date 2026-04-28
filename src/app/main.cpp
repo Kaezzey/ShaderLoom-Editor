@@ -368,7 +368,7 @@ GLuint createAsciiGlyphAtlas(int tileWidth, int tileHeight, int columns, int row
         const int y = (tile / columns) * tileHeight;
         RECT rect{x, y, x + tileWidth, y + tileHeight};
         const wchar_t text[2] = {glyphs[static_cast<std::size_t>(tile)], L'\0'};
-        DrawTextW(dc, text, 1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+        DrawTextW(dc, text, 1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX);
     }
 
     std::vector<std::uint8_t> coverage(static_cast<std::size_t>(atlasWidth * atlasHeight), 0);
@@ -394,7 +394,7 @@ GLuint createAsciiGlyphAtlas(int tileWidth, int tileHeight, int columns, int row
     const int spreadSquared = spread * spread;
     std::vector<std::uint8_t> rgba(static_cast<std::size_t>(atlasWidth * atlasHeight * 4), 0);
 
-    constexpr std::uint8_t sdfInsideThreshold = 24;
+    constexpr std::uint8_t sdfInsideThreshold = 1;
 
     for (int y = 0; y < atlasHeight; ++y) {
         const int tileY = y / tileHeight;
@@ -567,6 +567,7 @@ const char* asciiSetName(int index) {
         "STANDARD",
         "BLOCKS",
         "BINARY",
+        "DETAILED",
         "MINIMAL",
         "ALPHABETIC",
         "NUMERIC",
@@ -1439,7 +1440,7 @@ void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedIm
         float outputWidth = static_cast<float>(settings.ascii.outputWidth);
         valueSlider("Output Width", &outputWidth, 0.0F, 4096.0F, "%.0f");
         settings.ascii.outputWidth = static_cast<int>(std::round(outputWidth));
-        const char* characterSets[] = {"STANDARD", "BLOCKS", "BINARY", "MINIMAL", "ALPHABETIC", "NUMERIC", "MATH", "SYMBOLS"};
+        const char* characterSets[] = {"STANDARD", "BLOCKS", "BINARY", "DETAILED", "MINIMAL", "ALPHABETIC", "NUMERIC", "MATH", "SYMBOLS"};
         ImGui::TextDisabled("Character Set");
         ImGui::SameLine(92.0F);
         ImGui::SetNextItemWidth(-1.0F);

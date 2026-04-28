@@ -92,6 +92,9 @@ AsciiResult AsciiEffect::generate(const Image& source, const AsciiSettings& sett
             const int y = std::clamp(static_cast<int>(v * source.height()), 0, source.height() - 1);
             const float luma = luminance(processedSource.pixel(x, y));
             auto glyphIndex = static_cast<std::size_t>(std::round(luma * static_cast<float>(glyphs.size() - 1)));
+            if ((settings.characterSet == "BINARY" || settings.characterSet == "DETAILED") && glyphIndex == 0 && glyphs.size() > 1) {
+                glyphIndex = 1;
+            }
             const AsciiGlyphToken& glyph = glyphs[std::clamp(glyphIndex, std::size_t{0}, glyphs.size() - 1)];
             line += glyph.utf8;
             lineCodes.push_back(glyph.codepoint);
@@ -163,20 +166,23 @@ std::vector<AsciiGlyphToken> AsciiEffect::glyphsFor(const std::string& name) con
     if (name == "BINARY") {
         return asciiGlyphs(" 01");
     }
+    if (name == "DETAILED") {
+        return asciiGlyphs(" .^\",:;Il!i><~+-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$");
+    }
     if (name == "MINIMAL") {
         return asciiGlyphs(" .:-=+*#%@");
     }
     if (name == "ALPHABETIC") {
-        return asciiGlyphs(".,:ilcvunxrjftLCJUYXZO0QdbpqwmhaoMW");
+        return asciiGlyphs(" .,:ilcvunxrjftLCJUYXZO0QdbpqwmhaoMW");
     }
     if (name == "NUMERIC") {
-        return asciiGlyphs("1234567890");
+        return asciiGlyphs(" 1234567890");
     }
     if (name == "MATH") {
-        return asciiGlyphs(".-+=*/%#@");
+        return asciiGlyphs(" .-+=*/%#@");
     }
     if (name == "SYMBOLS") {
-        return asciiGlyphs(".,:;!<>?/|\\{}[]()#$%@");
+        return asciiGlyphs(" .,:;!<>?/|\\{}[]()#$%@");
     }
     return asciiGlyphs(" .:-=+*#%@");
 }
