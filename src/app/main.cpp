@@ -44,6 +44,7 @@ constexpr int GlyphAtlasColumns = 16;
 constexpr int GlyphAtlasRows = 7;
 constexpr int GlyphAtlasAsciiCount = 95;
 constexpr int GlyphAtlasBlockStart = GlyphAtlasAsciiCount;
+constexpr float UiPi = 3.14159265358979323846F;
 
 ImFont* gLogoFont = nullptr;
 
@@ -836,7 +837,9 @@ std::string cpuEffectCacheKey(const LoadedImageState& imageState, int selectedEf
         << settings.context.processing.noiseFieldStrength << '|'
         << settings.context.processing.noiseFieldScale << '|'
         << settings.context.processing.noiseFieldSpeed << '|'
-        << settings.context.processing.noiseFieldDirection << '|';
+        << settings.context.processing.noiseFieldDirection << '|'
+        << settings.context.processing.noiseFieldAngleDegrees << '|'
+        << settings.context.processing.noiseFieldDistortion << '|';
 
     if (selectedEffect == 0) {
         key << settings.ascii.scale << '|'
@@ -1155,6 +1158,60 @@ void valueSlider(const char* label, float* value, float min, float max, const ch
     ImGui::SameLine(138.0F);
     ImGui::SetNextItemWidth(-1.0F);
     ImGui::SliderFloat("##slider", value, min, max, "");
+    ImGui::PopID();
+}
+
+float normalizeDegrees(float degrees) {
+    degrees = std::fmod(degrees, 360.0F);
+    if (degrees < 0.0F) {
+        degrees += 360.0F;
+    }
+    return degrees;
+}
+
+void angleDial(const char* label, float* angleDegrees) {
+    ImGui::PushID(label);
+    *angleDegrees = normalizeDegrees(*angleDegrees);
+
+    ImGui::TextDisabled("%s", label);
+    ImGui::SameLine(92.0F);
+
+    constexpr float size = 68.0F;
+    ImGui::InvisibleButton("##dial", ImVec2(size, size));
+    const ImVec2 min = ImGui::GetItemRectMin();
+    const ImVec2 max = ImGui::GetItemRectMax();
+    const ImVec2 center((min.x + max.x) * 0.5F, (min.y + max.y) * 0.5F);
+    const float radius = (size * 0.5F) - 5.0F;
+
+    if (ImGui::IsItemActive()) {
+        const ImVec2 mouse = ImGui::GetIO().MousePos;
+        *angleDegrees = normalizeDegrees(std::atan2(mouse.y - center.y, mouse.x - center.x) * 180.0F / UiPi);
+    }
+
+    const float angle = *angleDegrees * UiPi / 180.0F;
+    const ImVec2 direction(std::cos(angle), std::sin(angle));
+    const ImVec2 tip(center.x + (direction.x * (radius - 3.0F)), center.y + (direction.y * (radius - 3.0F)));
+    const ImVec2 tail(center.x - (direction.x * 9.0F), center.y - (direction.y * 9.0F));
+    const ImVec2 normal(-direction.y, direction.x);
+    const ImVec2 headLeft(
+        tip.x - (direction.x * 11.0F) + (normal.x * 5.5F),
+        tip.y - (direction.y * 11.0F) + (normal.y * 5.5F)
+    );
+    const ImVec2 headRight(
+        tip.x - (direction.x * 11.0F) - (normal.x * 5.5F),
+        tip.y - (direction.y * 11.0F) - (normal.y * 5.5F)
+    );
+
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    const bool hovered = ImGui::IsItemHovered();
+    drawList->AddCircleFilled(center, radius + 3.0F, IM_COL32(14, 18, 23, 230), 48);
+    drawList->AddCircle(center, radius + 3.0F, hovered ? IM_COL32(115, 150, 190, 255) : IM_COL32(55, 65, 76, 255), 48, 1.5F);
+    drawList->AddCircle(center, 2.5F, IM_COL32(170, 190, 210, 255), 16);
+    drawList->AddLine(tail, tip, IM_COL32(180, 214, 255, 255), 2.5F);
+    drawList->AddTriangleFilled(tip, headLeft, headRight, IM_COL32(205, 226, 255, 255));
+
+    ImGui::SameLine(172.0F);
+    ImGui::TextDisabled("%.0f deg", *angleDegrees);
     ImGui::PopID();
 }
 
@@ -1585,19 +1642,9 @@ void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedIm
         valueSlider("Shape Matching", &settings.context.processing.shapeMatching, 0.0F, 1.0F);
         ImGui::Checkbox("Noise Field", &settings.context.processing.noiseField);
         if (settings.context.processing.noiseField) {
-            const char* directions[] = {"Up", "Down", "Left", "Right"};
-            settings.context.processing.noiseFieldDirection =
-                std::clamp(settings.context.processing.noiseFieldDirection, 0, static_cast<int>(std::size(directions)) - 1);
-            ImGui::TextDisabled("Direction");
-            ImGui::SameLine(92.0F);
-            ImGui::SetNextItemWidth(-1.0F);
-            ImGui::Combo(
-                "##noise-field-direction",
-                &settings.context.processing.noiseFieldDirection,
-                directions,
-                static_cast<int>(std::size(directions))
-            );
+            angleDial("Direction", &settings.context.processing.noiseFieldAngleDegrees);
             valueSlider("Strength##noise-field", &settings.context.processing.noiseFieldStrength, 0.0F, 1.0F);
+            valueSlider("Distortion##noise-field", &settings.context.processing.noiseFieldDistortion, 0.0F, 80.0F, "%.0f px");
             valueSlider("Scale##noise-field", &settings.context.processing.noiseFieldScale, 4.0F, 120.0F, "%.0f");
             valueSlider("Speed##noise-field", &settings.context.processing.noiseFieldSpeed, 0.0F, 4.0F);
         }

@@ -23,6 +23,10 @@ Pixel floatPixel(float r, float g, float b, std::uint8_t alpha) noexcept {
     return Pixel{toByte(r), toByte(g), toByte(b), alpha};
 }
 
+float mix(float lhs, float rhs, float amount) noexcept {
+    return (lhs * (1.0F - amount)) + (rhs * amount);
+}
+
 Pixel mixPixels(Pixel lhs, Pixel rhs, float amount) noexcept {
     amount = std::clamp(amount, 0.0F, 1.0F);
     const float keep = 1.0F - amount;
@@ -32,6 +36,29 @@ Pixel mixPixels(Pixel lhs, Pixel rhs, float amount) noexcept {
         toByte((toFloat(lhs.b) * keep) + (toFloat(rhs.b) * amount)),
         lhs.a
     };
+}
+
+Pixel sampleBilinear(const Image& image, float x, float y) noexcept {
+    x = std::clamp(x, 0.0F, static_cast<float>(std::max(image.width() - 1, 0)));
+    y = std::clamp(y, 0.0F, static_cast<float>(std::max(image.height() - 1, 0)));
+    const int x0 = static_cast<int>(std::floor(x));
+    const int y0 = static_cast<int>(std::floor(y));
+    const int x1 = std::min(x0 + 1, image.width() - 1);
+    const int y1 = std::min(y0 + 1, image.height() - 1);
+    const float tx = x - static_cast<float>(x0);
+    const float ty = y - static_cast<float>(y0);
+
+    const Pixel a = image.pixel(x0, y0);
+    const Pixel b = image.pixel(x1, y0);
+    const Pixel c = image.pixel(x0, y1);
+    const Pixel d = image.pixel(x1, y1);
+    const float topR = mix(toFloat(a.r), toFloat(b.r), tx);
+    const float topG = mix(toFloat(a.g), toFloat(b.g), tx);
+    const float topB = mix(toFloat(a.b), toFloat(b.b), tx);
+    const float bottomR = mix(toFloat(c.r), toFloat(d.r), tx);
+    const float bottomG = mix(toFloat(c.g), toFloat(d.g), tx);
+    const float bottomB = mix(toFloat(c.b), toFloat(d.b), tx);
+    return floatPixel(mix(topR, bottomR, ty), mix(topG, bottomG, ty), mix(topB, bottomB, ty), a.a);
 }
 
 void rotateHue(float& r, float& g, float& b, float degrees) noexcept {
@@ -138,10 +165,6 @@ float sobelEdge(const Image& image, int x, int y) {
     return std::clamp(std::sqrt((gx * gx) + (gy * gy)), 0.0F, 1.0F);
 }
 
-float mix(float lhs, float rhs, float amount) noexcept {
-    return (lhs * (1.0F - amount)) + (rhs * amount);
-}
-
 float fade(float value) noexcept {
     return value * value * value * (value * ((value * 6.0F) - 15.0F) + 10.0F);
 }
@@ -184,17 +207,9 @@ float fbmNoise(float x, float y) noexcept {
     return total / std::max(normalizer, 0.001F);
 }
 
-std::pair<float, float> directionVector(int direction) noexcept {
-    switch (direction) {
-    case 0:
-        return {0.0F, -1.0F};
-    case 1:
-        return {0.0F, 1.0F};
-    case 2:
-        return {-1.0F, 0.0F};
-    default:
-        return {1.0F, 0.0F};
-    }
+std::pair<float, float> directionVector(float angleDegrees) noexcept {
+    const float angle = angleDegrees * Pi / 180.0F;
+    return {std::cos(angle), -std::sin(angle)};
 }
 
 float noiseFieldAmount(int x, int y, const RenderContext& context) noexcept {
@@ -205,7 +220,7 @@ float noiseFieldAmount(int x, int y, const RenderContext& context) noexcept {
 
     const float scale = std::clamp(processing.noiseFieldScale, 4.0F, 120.0F);
     const float speed = std::clamp(processing.noiseFieldSpeed, 0.0F, 4.0F);
-    const auto [directionX, directionY] = directionVector(processing.noiseFieldDirection);
+    const auto [directionX, directionY] = directionVector(processing.noiseFieldAngleDegrees);
     const float drift = context.timeSeconds * speed * 90.0F;
     const float sampleX = static_cast<float>(x) - (directionX * drift);
     const float sampleY = static_cast<float>(y) - (directionY * drift);
@@ -218,6 +233,43 @@ float noiseFieldAmount(int x, int y, const RenderContext& context) noexcept {
     const float fine = (valueNoise(sampleX / fineScale, sampleY / fineScale) * 2.0F) - 1.0F;
     const float strength = std::clamp(processing.noiseFieldStrength, 0.0F, 1.0F);
     return ((field * 0.82F) + (fine * 0.18F)) * strength * 0.22F;
+}
+
+std::pair<float, float> noiseFieldVector(int x, int y, const RenderContext& context) noexcept {
+    const auto& processing = context.processing;
+    if (!processing.noiseField || processing.noiseFieldDistortion <= 0.001F) {
+        return {0.0F, 0.0F};
+    }
+
+    const float scale = std::clamp(processing.noiseFieldScale, 4.0F, 120.0F);
+    const float speed = std::clamp(processing.noiseFieldSpeed, 0.0F, 4.0F);
+    const auto [directionX, directionY] = directionVector(processing.noiseFieldAngleDegrees);
+    const float drift = context.timeSeconds * speed * 90.0F;
+    const float sampleX = static_cast<float>(x) - (directionX * drift);
+    const float sampleY = static_cast<float>(y) - (directionY * drift);
+    const float baseX = sampleX / scale;
+    const float baseY = sampleY / scale;
+    const float warpX = (valueNoise((baseX * 0.35F) + 17.3F, (baseY * 0.35F) - 9.7F) * 2.0F) - 1.0F;
+    const float warpY = (valueNoise((baseX * 0.35F) - 41.1F, (baseY * 0.35F) + 23.8F) * 2.0F) - 1.0F;
+    const float fieldX = fbmNoise(baseX + (warpX * 0.75F) + 31.7F, baseY + (warpY * 0.75F) - 12.4F);
+    const float fieldY = fbmNoise(baseX + (warpX * 0.75F) - 18.6F, baseY + (warpY * 0.75F) + 46.2F);
+    const float amount = std::clamp(processing.noiseFieldDistortion, 0.0F, 80.0F);
+    return {fieldX * amount, fieldY * amount};
+}
+
+Image applyNoiseFieldDistortion(const Image& image, const RenderContext& context) {
+    if (!context.processing.noiseField || context.processing.noiseFieldDistortion <= 0.001F) {
+        return image;
+    }
+
+    Image output(image.width(), image.height());
+    for (int y = 0; y < image.height(); ++y) {
+        for (int x = 0; x < image.width(); ++x) {
+            const auto [offsetX, offsetY] = noiseFieldVector(x, y, context);
+            output.setPixel(x, y, sampleBilinear(image, static_cast<float>(x) + offsetX, static_cast<float>(y) + offsetY));
+        }
+    }
+    return output;
 }
 
 Image applyNoiseField(const Image& image, const RenderContext& context) {
@@ -333,10 +385,11 @@ Pixel applyProcessing(Pixel pixel, const RenderContext& context) {
 }
 
 Image applyProcessing(const Image& image, const RenderContext& context) {
-    Image output(image.width(), image.height());
-    for (int y = 0; y < image.height(); ++y) {
-        for (int x = 0; x < image.width(); ++x) {
-            output.setPixel(x, y, applyProcessing(image.pixel(x, y), context));
+    const Image source = applyNoiseFieldDistortion(image, context);
+    Image output(source.width(), source.height());
+    for (int y = 0; y < source.height(); ++y) {
+        for (int x = 0; x < source.width(); ++x) {
+            output.setPixel(x, y, applyProcessing(source.pixel(x, y), context));
         }
     }
 

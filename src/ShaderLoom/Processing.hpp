@@ -25,6 +25,8 @@ struct ProcessingSettings {
     float noiseFieldScale = 24.0F;
     float noiseFieldSpeed = 1.0F;
     int noiseFieldDirection = 3;
+    float noiseFieldAngleDegrees = 0.0F;
+    float noiseFieldDistortion = 18.0F;
 };
 
 struct RenderContext {

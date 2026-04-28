@@ -187,7 +187,10 @@ uniform int uNoiseField;
 uniform float uNoiseFieldStrength;
 uniform float uNoiseFieldScale;
 uniform float uNoiseFieldSpeed;
+uniform float uNoiseFieldBoost;
 uniform int uNoiseFieldDirection;
+uniform float uNoiseFieldAngleDegrees;
+uniform float uNoiseFieldDistortion;
 uniform float uTime;
 
 float luma(vec3 color) {
@@ -261,11 +264,9 @@ float fbmNoise(vec2 p) {
     return total / max(normalizer, 0.001);
 }
 
-vec2 directionVector(int direction) {
-    if (direction == 0) { return vec2(0.0, -1.0); }
-    if (direction == 1) { return vec2(0.0, 1.0); }
-    if (direction == 2) { return vec2(-1.0, 0.0); }
-    return vec2(1.0, 0.0);
+vec2 directionVector(float angleDegrees) {
+    float angle = radians(angleDegrees);
+    return vec2(cos(angle), -sin(angle));
 }
 
 float noiseFieldAmount(vec2 uv) {
@@ -276,7 +277,7 @@ float noiseFieldAmount(vec2 uv) {
     float scale = clamp(uNoiseFieldScale, 4.0, 120.0);
     float speed = clamp(uNoiseFieldSpeed, 0.0, 4.0);
     vec2 screenUv = vec2(uv.x, 1.0 - uv.y);
-    vec2 samplePx = (screenUv * uResolution) - (directionVector(uNoiseFieldDirection) * uTime * speed * 90.0);
+    vec2 samplePx = (screenUv * uResolution) - (directionVector(uNoiseFieldAngleDegrees) * uTime * speed * 90.0);
     vec2 base = samplePx / scale;
     vec2 warp = vec2(
         valueNoise(base * 0.35 + vec2(17.3, -9.7)),
@@ -285,16 +286,39 @@ float noiseFieldAmount(vec2 uv) {
     float field = fbmNoise(base + warp * 0.75);
     float fineScale = max(scale * 0.22, 2.0);
     float fine = valueNoise(samplePx / fineScale) * 2.0 - 1.0;
-    return (field * 0.82 + fine * 0.18) * clamp(uNoiseFieldStrength, 0.0, 1.0) * 0.22;
+    return (field * 0.82 + fine * 0.18) * clamp(uNoiseFieldStrength, 0.0, 1.0) * 0.22 * max(uNoiseFieldBoost, 0.0);
+}
+
+vec2 noiseFieldVector(vec2 uv) {
+    if (uNoiseField != 1 || uNoiseFieldDistortion <= 0.001) {
+        return vec2(0.0);
+    }
+
+    float scale = clamp(uNoiseFieldScale, 4.0, 120.0);
+    float speed = clamp(uNoiseFieldSpeed, 0.0, 4.0);
+    vec2 screenUv = vec2(uv.x, 1.0 - uv.y);
+    vec2 samplePx = (screenUv * uResolution) - (directionVector(uNoiseFieldAngleDegrees) * uTime * speed * 90.0);
+    vec2 base = samplePx / scale;
+    vec2 warp = vec2(
+        valueNoise(base * 0.35 + vec2(17.3, -9.7)),
+        valueNoise(base * 0.35 + vec2(-41.1, 23.8))
+    ) * 2.0 - 1.0;
+    vec2 field = vec2(
+        fbmNoise(base + warp * 0.75 + vec2(31.7, -12.4)),
+        fbmNoise(base + warp * 0.75 + vec2(-18.6, 46.2))
+    );
+    return field * clamp(uNoiseFieldDistortion, 0.0, 80.0);
 }
 
 void main() {
     vec2 texel = 1.0 / max(uResolution, vec2(1.0));
-    vec4 source = texture(uSource, vTexCoord);
+    vec2 distortion = noiseFieldVector(vTexCoord);
+    vec2 sourceUv = clamp(vTexCoord + vec2(distortion.x / uResolution.x, -distortion.y / uResolution.y), vec2(0.0), vec2(1.0));
+    vec4 source = texture(uSource, sourceUv);
     vec3 color = source.rgb;
 
     if (uBlur > 0.001) {
-        color = mix(color, blurSample(vTexCoord, texel * max(uBlur, 1.0)), clamp(uBlur / 10.0, 0.0, 1.0));
+        color = mix(color, blurSample(sourceUv, texel * max(uBlur, 1.0)), clamp(uBlur / 10.0, 0.0, 1.0));
     }
 
     if (uInvert == 1) {
@@ -309,12 +333,12 @@ void main() {
     color = clamp(color, vec3(0.0), vec3(1.0));
 
     if (uSharpness > 0.001) {
-        vec3 center = texture(uSource, vTexCoord).rgb;
+        vec3 center = texture(uSource, sourceUv).rgb;
         vec3 sharp = center * 5.0
-            - texture(uSource, vTexCoord + vec2(texel.x, 0.0)).rgb
-            - texture(uSource, vTexCoord - vec2(texel.x, 0.0)).rgb
-            - texture(uSource, vTexCoord + vec2(0.0, texel.y)).rgb
-            - texture(uSource, vTexCoord - vec2(0.0, texel.y)).rgb;
+            - texture(uSource, sourceUv + vec2(texel.x, 0.0)).rgb
+            - texture(uSource, sourceUv - vec2(texel.x, 0.0)).rgb
+            - texture(uSource, sourceUv + vec2(0.0, texel.y)).rgb
+            - texture(uSource, sourceUv - vec2(0.0, texel.y)).rgb;
         color = mix(color, sharp, clamp(uSharpness / 5.0, 0.0, 1.0));
     }
 
@@ -333,7 +357,7 @@ void main() {
     color += vec3(noiseFieldAmount(vTexCoord));
 
     if (uEdgeEnhance > 0.001) {
-        color += sobel(vTexCoord, texel) * (uEdgeEnhance / 5.0);
+        color += sobel(sourceUv, texel) * (uEdgeEnhance / 5.0);
     }
 
     if (uQuantizeColors > 1.0) {
@@ -1301,7 +1325,12 @@ GLuint PreviewPipeline::render(
         preprocessShader_.setFloat("uNoiseFieldStrength", settings.context.processing.noiseFieldStrength);
         preprocessShader_.setFloat("uNoiseFieldScale", settings.context.processing.noiseFieldScale);
         preprocessShader_.setFloat("uNoiseFieldSpeed", settings.context.processing.noiseFieldSpeed);
+        const float noiseFieldBoost =
+            (settings.effect == PreviewEffect::Halftone || settings.effect == PreviewEffect::Dots) ? 1.85F : 1.0F;
+        preprocessShader_.setFloat("uNoiseFieldBoost", noiseFieldBoost);
         preprocessShader_.setInt("uNoiseFieldDirection", settings.context.processing.noiseFieldDirection);
+        preprocessShader_.setFloat("uNoiseFieldAngleDegrees", settings.context.processing.noiseFieldAngleDegrees);
+        preprocessShader_.setFloat("uNoiseFieldDistortion", settings.context.processing.noiseFieldDistortion);
         preprocessShader_.setFloat("uTime", settings.timeSeconds);
         quad_.draw();
         glBindTexture(GL_TEXTURE_2D, 0);
