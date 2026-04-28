@@ -183,6 +183,12 @@ uniform float uEdgeEnhance;
 uniform float uBlur;
 uniform float uQuantizeColors;
 uniform float uShapeMatching;
+uniform int uNoiseField;
+uniform float uNoiseFieldStrength;
+uniform float uNoiseFieldScale;
+uniform float uNoiseFieldSpeed;
+uniform int uNoiseFieldDirection;
+uniform float uTime;
 
 float luma(vec3 color) {
     return dot(color, vec3(0.299, 0.587, 0.114));
@@ -223,6 +229,63 @@ float sobel(vec2 uv, vec2 texel) {
     float gx = -tl - 2.0 * ml - bl + tr + 2.0 * mr + br;
     float gy = -tl - 2.0 * tc - tr + bl + 2.0 * bc + br;
     return clamp(length(vec2(gx, gy)), 0.0, 1.0);
+}
+
+float hashGrid(vec2 p) {
+    p = mod(p, vec2(4096.0));
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+float valueNoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float a = hashGrid(i);
+    float b = hashGrid(i + vec2(1.0, 0.0));
+    float c = hashGrid(i + vec2(0.0, 1.0));
+    float d = hashGrid(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+float fbmNoise(vec2 p) {
+    float total = 0.0;
+    float amplitude = 0.55;
+    float normalizer = 0.0;
+    float frequency = 1.0;
+    for (int octave = 0; octave < 5; ++octave) {
+        total += (valueNoise(p * frequency) * 2.0 - 1.0) * amplitude;
+        normalizer += amplitude;
+        amplitude *= 0.5;
+        frequency *= 2.17;
+    }
+    return total / max(normalizer, 0.001);
+}
+
+vec2 directionVector(int direction) {
+    if (direction == 0) { return vec2(0.0, -1.0); }
+    if (direction == 1) { return vec2(0.0, 1.0); }
+    if (direction == 2) { return vec2(-1.0, 0.0); }
+    return vec2(1.0, 0.0);
+}
+
+float noiseFieldAmount(vec2 uv) {
+    if (uNoiseField != 1 || uNoiseFieldStrength <= 0.001) {
+        return 0.0;
+    }
+
+    float scale = clamp(uNoiseFieldScale, 4.0, 120.0);
+    float speed = clamp(uNoiseFieldSpeed, 0.0, 4.0);
+    vec2 screenUv = vec2(uv.x, 1.0 - uv.y);
+    vec2 samplePx = (screenUv * uResolution) - (directionVector(uNoiseFieldDirection) * uTime * speed * 90.0);
+    vec2 base = samplePx / scale;
+    vec2 warp = vec2(
+        valueNoise(base * 0.35 + vec2(17.3, -9.7)),
+        valueNoise(base * 0.35 + vec2(-41.1, 23.8))
+    ) * 2.0 - 1.0;
+    float field = fbmNoise(base + warp * 0.75);
+    float fineScale = max(scale * 0.22, 2.0);
+    float fine = valueNoise(samplePx / fineScale) * 2.0 - 1.0;
+    return (field * 0.82 + fine * 0.18) * clamp(uNoiseFieldStrength, 0.0, 1.0) * 0.22;
 }
 
 void main() {
@@ -266,6 +329,8 @@ void main() {
         float shapedLuma = floor(smoothstep(0.05, 0.95, currentLuma) * 5.0 + 0.5) / 5.0;
         color = mix(color, color * (shapedLuma / currentLuma), clamp(uShapeMatching, 0.0, 1.0));
     }
+
+    color += vec3(noiseFieldAmount(vTexCoord));
 
     if (uEdgeEnhance > 0.001) {
         color += sobel(vTexCoord, texel) * (uEdgeEnhance / 5.0);
@@ -1232,6 +1297,12 @@ GLuint PreviewPipeline::render(
         preprocessShader_.setFloat("uBlur", settings.context.processing.blur);
         preprocessShader_.setFloat("uQuantizeColors", static_cast<float>(settings.context.processing.quantizeColors));
         preprocessShader_.setFloat("uShapeMatching", settings.context.processing.shapeMatching);
+        preprocessShader_.setInt("uNoiseField", settings.context.processing.noiseField ? 1 : 0);
+        preprocessShader_.setFloat("uNoiseFieldStrength", settings.context.processing.noiseFieldStrength);
+        preprocessShader_.setFloat("uNoiseFieldScale", settings.context.processing.noiseFieldScale);
+        preprocessShader_.setFloat("uNoiseFieldSpeed", settings.context.processing.noiseFieldSpeed);
+        preprocessShader_.setInt("uNoiseFieldDirection", settings.context.processing.noiseFieldDirection);
+        preprocessShader_.setFloat("uTime", settings.timeSeconds);
         quad_.draw();
         glBindTexture(GL_TEXTURE_2D, 0);
         glUseProgramPtr(0);

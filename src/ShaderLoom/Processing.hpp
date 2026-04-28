@@ -20,11 +20,17 @@ struct ProcessingSettings {
     float blur = 0.0F;
     int quantizeColors = 0;
     float shapeMatching = 0.0F;
+    bool noiseField = false;
+    float noiseFieldStrength = 0.4F;
+    float noiseFieldScale = 24.0F;
+    float noiseFieldSpeed = 1.0F;
+    int noiseFieldDirection = 3;
 };
 
 struct RenderContext {
     AdjustmentSettings adjustments;
     ProcessingSettings processing;
+    float timeSeconds = 0.0F;
 };
 
 [[nodiscard]] float luminance(Pixel pixel) noexcept;

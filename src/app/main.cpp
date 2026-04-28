@@ -710,6 +710,7 @@ ShaderLoom::Image renderAsciiRaster(
 ) {
     ShaderLoom::AsciiEffect ascii;
     const ShaderLoom::AsciiResult result = ascii.generate(source, settings, context);
+    const ShaderLoom::Image processedSource = ShaderLoom::applyProcessing(source, context);
     ShaderLoom::Image output(source.width(), source.height());
     std::vector<std::uint8_t>& pixels = output.pixels();
     std::fill(pixels.begin(), pixels.end(), 0);
@@ -727,7 +728,7 @@ ShaderLoom::Image renderAsciiRaster(
             const int x1 = std::max(x0 + 1, ((col + 1) * source.width()) / columns);
             const int sampleX = std::clamp((x0 + x1) / 2, 0, source.width() - 1);
             const int sampleY = std::clamp((y0 + y1) / 2, 0, source.height() - 1);
-            const ShaderLoom::Pixel color = ShaderLoom::applyProcessing(source.pixel(sampleX, sampleY), context);
+            const ShaderLoom::Pixel color = processedSource.pixel(sampleX, sampleY);
             const std::uint32_t glyph = result.glyphCodes[static_cast<std::size_t>(row)][static_cast<std::size_t>(col)];
             const GlyphRows rowsForGlyph = glyphRows(glyph);
             const int cellWidth = std::max(1, x1 - x0);
@@ -771,6 +772,7 @@ void syncPreviewSettings(AppSettings& settings, int selectedEffect, float timeSe
         ? ShaderLoom::app::PreviewEffect::Passthrough
         : effectForIndex(selectedEffect);
     settings.preview.context = settings.context;
+    settings.preview.context.timeSeconds = timeSeconds;
     settings.preview.sourceAlreadyProcessed = isCpuEffect(selectedEffect);
     settings.preview.renderScale = std::clamp(std::round(settings.preview.renderScale), 1.0F, 4.0F);
     settings.preview.ascii.scale = settings.ascii.scale;
@@ -829,7 +831,12 @@ std::string cpuEffectCacheKey(const LoadedImageState& imageState, int selectedEf
         << settings.context.processing.edgeEnhance << '|'
         << settings.context.processing.blur << '|'
         << settings.context.processing.quantizeColors << '|'
-        << settings.context.processing.shapeMatching << '|';
+        << settings.context.processing.shapeMatching << '|'
+        << settings.context.processing.noiseField << '|'
+        << settings.context.processing.noiseFieldStrength << '|'
+        << settings.context.processing.noiseFieldScale << '|'
+        << settings.context.processing.noiseFieldSpeed << '|'
+        << settings.context.processing.noiseFieldDirection << '|';
 
     if (selectedEffect == 0) {
         key << settings.ascii.scale << '|'
@@ -1576,6 +1583,24 @@ void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedIm
         valueSlider("Quantize Colors", &quantize, 0.0F, 32.0F, "%.0f");
         settings.context.processing.quantizeColors = static_cast<int>(std::round(quantize));
         valueSlider("Shape Matching", &settings.context.processing.shapeMatching, 0.0F, 1.0F);
+        ImGui::Checkbox("Noise Field", &settings.context.processing.noiseField);
+        if (settings.context.processing.noiseField) {
+            const char* directions[] = {"Up", "Down", "Left", "Right"};
+            settings.context.processing.noiseFieldDirection =
+                std::clamp(settings.context.processing.noiseFieldDirection, 0, static_cast<int>(std::size(directions)) - 1);
+            ImGui::TextDisabled("Direction");
+            ImGui::SameLine(92.0F);
+            ImGui::SetNextItemWidth(-1.0F);
+            ImGui::Combo(
+                "##noise-field-direction",
+                &settings.context.processing.noiseFieldDirection,
+                directions,
+                static_cast<int>(std::size(directions))
+            );
+            valueSlider("Strength##noise-field", &settings.context.processing.noiseFieldStrength, 0.0F, 1.0F);
+            valueSlider("Scale##noise-field", &settings.context.processing.noiseFieldScale, 4.0F, 120.0F, "%.0f");
+            valueSlider("Speed##noise-field", &settings.context.processing.noiseFieldSpeed, 0.0F, 4.0F);
+        }
         ImGui::PopID();
     }
 

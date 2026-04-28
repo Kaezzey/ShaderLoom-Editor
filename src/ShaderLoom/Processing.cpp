@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <utility>
 
 namespace ShaderLoom {
 namespace {
@@ -136,6 +138,108 @@ float sobelEdge(const Image& image, int x, int y) {
     return std::clamp(std::sqrt((gx * gx) + (gy * gy)), 0.0F, 1.0F);
 }
 
+float mix(float lhs, float rhs, float amount) noexcept {
+    return (lhs * (1.0F - amount)) + (rhs * amount);
+}
+
+float fade(float value) noexcept {
+    return value * value * value * (value * ((value * 6.0F) - 15.0F) + 10.0F);
+}
+
+float hashGrid(int x, int y) noexcept {
+    auto value = static_cast<std::uint32_t>(x) * 0x8da6b343U;
+    value ^= static_cast<std::uint32_t>(y) * 0xd8163841U;
+    value ^= value >> 13U;
+    value *= 0x85ebca6bU;
+    value ^= value >> 16U;
+    return static_cast<float>(value & 0x00ffffffU) / static_cast<float>(0x01000000U);
+}
+
+float valueNoise(float x, float y) noexcept {
+    const int ix = static_cast<int>(std::floor(x));
+    const int iy = static_cast<int>(std::floor(y));
+    const float fx = x - static_cast<float>(ix);
+    const float fy = y - static_cast<float>(iy);
+    const float u = fade(fx);
+    const float v = fade(fy);
+
+    const float a = hashGrid(ix, iy);
+    const float b = hashGrid(ix + 1, iy);
+    const float c = hashGrid(ix, iy + 1);
+    const float d = hashGrid(ix + 1, iy + 1);
+    return mix(mix(a, b, u), mix(c, d, u), v);
+}
+
+float fbmNoise(float x, float y) noexcept {
+    float total = 0.0F;
+    float amplitude = 0.55F;
+    float normalizer = 0.0F;
+    float frequency = 1.0F;
+    for (int octave = 0; octave < 5; ++octave) {
+        total += ((valueNoise(x * frequency, y * frequency) * 2.0F) - 1.0F) * amplitude;
+        normalizer += amplitude;
+        amplitude *= 0.5F;
+        frequency *= 2.17F;
+    }
+    return total / std::max(normalizer, 0.001F);
+}
+
+std::pair<float, float> directionVector(int direction) noexcept {
+    switch (direction) {
+    case 0:
+        return {0.0F, -1.0F};
+    case 1:
+        return {0.0F, 1.0F};
+    case 2:
+        return {-1.0F, 0.0F};
+    default:
+        return {1.0F, 0.0F};
+    }
+}
+
+float noiseFieldAmount(int x, int y, const RenderContext& context) noexcept {
+    const auto& processing = context.processing;
+    if (!processing.noiseField || processing.noiseFieldStrength <= 0.001F) {
+        return 0.0F;
+    }
+
+    const float scale = std::clamp(processing.noiseFieldScale, 4.0F, 120.0F);
+    const float speed = std::clamp(processing.noiseFieldSpeed, 0.0F, 4.0F);
+    const auto [directionX, directionY] = directionVector(processing.noiseFieldDirection);
+    const float drift = context.timeSeconds * speed * 90.0F;
+    const float sampleX = static_cast<float>(x) - (directionX * drift);
+    const float sampleY = static_cast<float>(y) - (directionY * drift);
+    const float baseX = sampleX / scale;
+    const float baseY = sampleY / scale;
+    const float warpX = (valueNoise((baseX * 0.35F) + 17.3F, (baseY * 0.35F) - 9.7F) * 2.0F) - 1.0F;
+    const float warpY = (valueNoise((baseX * 0.35F) - 41.1F, (baseY * 0.35F) + 23.8F) * 2.0F) - 1.0F;
+    const float field = fbmNoise(baseX + (warpX * 0.75F), baseY + (warpY * 0.75F));
+    const float fineScale = std::max(scale * 0.22F, 2.0F);
+    const float fine = (valueNoise(sampleX / fineScale, sampleY / fineScale) * 2.0F) - 1.0F;
+    const float strength = std::clamp(processing.noiseFieldStrength, 0.0F, 1.0F);
+    return ((field * 0.82F) + (fine * 0.18F)) * strength * 0.22F;
+}
+
+Image applyNoiseField(const Image& image, const RenderContext& context) {
+    if (!context.processing.noiseField || context.processing.noiseFieldStrength <= 0.001F) {
+        return image;
+    }
+
+    Image output(image.width(), image.height());
+    for (int y = 0; y < image.height(); ++y) {
+        for (int x = 0; x < image.width(); ++x) {
+            const Pixel pixel = image.pixel(x, y);
+            const float field = noiseFieldAmount(x, y, context);
+            output.setPixel(
+                x,
+                y,
+                floatPixel(toFloat(pixel.r) + field, toFloat(pixel.g) + field, toFloat(pixel.b) + field, pixel.a)
+            );
+        }
+    }
+    return output;
+}
+
 Image applyEdgeEnhance(const Image& image, float amount) {
     if (amount <= 0.001F) {
         return image;
@@ -238,6 +342,7 @@ Image applyProcessing(const Image& image, const RenderContext& context) {
 
     output = applyBlur(output, context.processing.blur);
     output = applySharpen(output, context.adjustments.sharpness);
+    output = applyNoiseField(output, context);
     output = applyEdgeEnhance(output, context.processing.edgeEnhance);
     return output;
 }
