@@ -112,9 +112,10 @@ struct AppSettings {
     float bloomSoftThreshold = 1.0F;
     float bloomIntensity = 0.7F;
     float bloomRadius = 7.0F;
-    float grainIntensity = 35.0F;
-    float grainSize = 2.0F;
-    float grainSpeed = 50.0F;
+    float grainIntensity = 18.0F;
+    float grainSize = 1.0F;
+    float grainSpeed = 48.0F;
+    int grainType = 0;
     float chromaticAmount = 6.0F;
     float scanlineIntensity = 0.25F;
     float vignetteIntensity = 0.45F;
@@ -550,7 +551,7 @@ ShaderLoom::app::PreviewEffect effectForIndex(int selectedEffect) {
 }
 
 bool isCpuEffect(int selectedEffect) {
-    return false;
+    return selectedEffect == 5;
 }
 
 int maxRenderTextureSize() {
@@ -766,7 +767,9 @@ ShaderLoom::Image renderAsciiRaster(
 
 void syncPreviewSettings(AppSettings& settings, int selectedEffect, float timeSeconds, GLuint glyphAtlasTexture) {
     settings.ascii.characterSet = asciiSetName(settings.asciiCharacterSet);
-    settings.preview.effect = effectForIndex(selectedEffect);
+    settings.preview.effect = isCpuEffect(selectedEffect)
+        ? ShaderLoom::app::PreviewEffect::Passthrough
+        : effectForIndex(selectedEffect);
     settings.preview.context = settings.context;
     settings.preview.sourceAlreadyProcessed = isCpuEffect(selectedEffect);
     settings.preview.renderScale = std::clamp(std::round(settings.preview.renderScale), 1.0F, 4.0F);
@@ -801,6 +804,7 @@ void syncPreviewSettings(AppSettings& settings, int selectedEffect, float timeSe
     settings.preview.grainIntensity = settings.grainIntensity;
     settings.preview.grainSize = settings.grainSize;
     settings.preview.grainSpeed = settings.grainSpeed;
+    settings.preview.grainType = settings.grainType;
     settings.preview.chromaticAmount = settings.chromaticAmount;
     settings.preview.scanlineIntensity = settings.scanlineIntensity;
     settings.preview.vignetteIntensity = settings.vignetteIntensity;
@@ -1586,9 +1590,14 @@ void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedIm
         }
         ImGui::Checkbox("Grain", &settings.grain);
         if (settings.grain) {
+            const char* grainTypes[] = {"Fine", "Soft", "Coarse", "Monochrome"};
+            ImGui::TextDisabled("Type");
+            ImGui::SameLine(92.0F);
+            ImGui::SetNextItemWidth(-1.0F);
+            ImGui::Combo("##grain-type", &settings.grainType, grainTypes, static_cast<int>(std::size(grainTypes)));
             valueSlider("Intensity##grain", &settings.grainIntensity, 0.0F, 100.0F, "%.0f");
-            valueSlider("Size", &settings.grainSize, 0.0F, 8.0F, "%.0f");
-            valueSlider("Speed", &settings.grainSpeed, 0.0F, 100.0F, "%.0f");
+            valueSlider("Size", &settings.grainSize, 0.0F, 2.0F, "%.1f");
+            valueSlider("Speed", &settings.grainSpeed, 1.0F, 120.0F, "%.0f fps");
         }
         ImGui::Checkbox("Chromatic", &settings.chromatic);
         if (settings.chromatic) {

@@ -96,6 +96,7 @@ struct PreviewRenderSettings {
     float grainIntensity = 35.0F;
     float grainSize = 2.0F;
     float grainSpeed = 50.0F;
+    int grainType = 0;
     float chromaticAmount = 6.0F;
     float scanlineIntensity = 0.25F;
     float vignetteIntensity = 0.45F;

@@ -508,7 +508,8 @@ void main() {
     if (uInvert == 1) {
         tone = 1.0 - tone;
     }
-    float radius = clamp(uDotScale, 0.0, 1.5) * (1.0 - tone);
+    float dotScale = clamp(uDotScale, 0.0, 1.5);
+    float radius = max(dotScale * (1.0 - tone), dotScale * 0.045);
     float distanceValue = length(local);
     if (uShape == 1) {
         distanceValue = max(abs(local.x), abs(local.y));
@@ -554,7 +555,8 @@ void main() {
     if (uInvert == 1) {
         tone = 1.0 - tone;
     }
-    float radius = clamp(uSize, 0.0, 2.0) * 0.45 * (1.0 - tone);
+    float dotSize = clamp(uSize, 0.0, 2.0) * 0.45;
+    float radius = max(dotSize * (1.0 - tone), dotSize * 0.055);
     float distanceValue = length(local);
     if (uShape == 1) {
         distanceValue = max(abs(local.x), abs(local.y));
@@ -745,6 +747,7 @@ uniform float uBloomRadius;
 uniform float uGrainIntensity;
 uniform float uGrainSize;
 uniform float uGrainSpeed;
+uniform int uGrainType;
 uniform float uChromaticAmount;
 uniform float uScanlineIntensity;
 uniform float uVignetteIntensity;
@@ -757,6 +760,50 @@ float luma(vec3 color) {
 
 float random(vec2 p) {
     return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+float randomSeeded(vec2 p, float seed) {
+    return fract(sin(dot(p, vec2(12.9898, 78.233)) + seed * 37.719) * 43758.5453);
+}
+
+float smoothRandom(vec2 p, float seed) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    float a = randomSeeded(i, seed);
+    float b = randomSeeded(i + vec2(1.0, 0.0), seed);
+    float c = randomSeeded(i + vec2(0.0, 1.0), seed);
+    float d = randomSeeded(i + vec2(1.0, 1.0), seed);
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+float filmGrain(vec2 pixel, float frame) {
+    float fine = randomSeeded(floor(pixel), frame * 11.0);
+    float fine2 = randomSeeded(floor(pixel * 1.71), frame * 19.0);
+    float soft = smoothRandom(pixel * 0.42, frame * 23.0);
+    return ((fine + fine2 + soft) / 3.0) - 0.5;
+}
+
+float softGrain(vec2 pixel, float frame) {
+    float soft = smoothRandom(pixel * 0.52, frame * 13.0);
+    float fine = smoothRandom(pixel * 1.18, frame * 31.0);
+    return mix(soft, fine, 0.35) - 0.5;
+}
+
+float coarseGrain(vec2 pixel, float frame) {
+    float coarse = randomSeeded(floor(pixel * 0.55), frame * 17.0);
+    float fine = randomSeeded(floor(pixel * 1.15), frame * 29.0);
+    return mix(coarse, fine, 0.28) - 0.5;
+}
+
+float grainSample(vec2 pixel, float frame, int type) {
+    if (type == 1) {
+        return softGrain(pixel, frame);
+    }
+    if (type == 2) {
+        return coarseGrain(pixel, frame);
+    }
+    return filmGrain(pixel, frame);
 }
 
 vec2 crtUv(vec2 uv) {
@@ -803,8 +850,25 @@ void main() {
     }
 
     if (uGrain == 1) {
-        float grain = random(floor(uv * uResolution / max(uGrainSize, 1.0)) + uTime * max(uGrainSpeed, 1.0));
-        color += (grain - 0.5) * (uGrainIntensity / 100.0);
+        float grainScale = max(uGrainSize, 0.75);
+        vec2 grainPixel = gl_FragCoord.xy / grainScale;
+        float grainTime = uTime * max(uGrainSpeed, 1.0);
+        float frame = floor(grainTime);
+        float blend = smoothstep(0.0, 1.0, fract(grainTime));
+        float grain = mix(grainSample(grainPixel, frame, uGrainType), grainSample(grainPixel, frame + 1.0, uGrainType), blend);
+        float tone = luma(color);
+        float highlightDamping = uGrainType == 2 ? 0.35 : 0.55;
+        float tonalMask = smoothstep(0.02, 0.35, tone) * (1.0 - smoothstep(0.72, 1.0, tone) * highlightDamping);
+        float typeAmount = uGrainType == 1 ? 0.34 : uGrainType == 2 ? 0.50 : 0.42;
+        float chromaAmount = uGrainType == 3 ? 0.0 : uGrainType == 2 ? 0.10 : 0.18;
+        float amount = (uGrainIntensity / 100.0) * typeAmount * tonalMask;
+        vec3 chroma = vec3(
+            grainSample(grainPixel + vec2(19.3, 7.1), frame, uGrainType),
+            grainSample(grainPixel + vec2(5.7, 31.9), frame, uGrainType),
+            grainSample(grainPixel + vec2(37.1, 17.4), frame, uGrainType)
+        );
+        color += vec3(grain) * amount;
+        color += chroma * amount * chromaAmount;
     }
 
     if (uScanlines == 1) {
@@ -1283,6 +1347,7 @@ GLuint PreviewPipeline::render(
     postShader_.setFloat("uGrainIntensity", settings.grainIntensity);
     postShader_.setFloat("uGrainSize", settings.grainSize);
     postShader_.setFloat("uGrainSpeed", settings.grainSpeed);
+    postShader_.setInt("uGrainType", settings.grainType);
     postShader_.setFloat("uChromaticAmount", settings.chromaticAmount);
     postShader_.setFloat("uScanlineIntensity", settings.scanlineIntensity);
     postShader_.setFloat("uVignetteIntensity", settings.vignetteIntensity);
