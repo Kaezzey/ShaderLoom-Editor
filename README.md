@@ -17,6 +17,12 @@ It features:
 
 ## Active Editor
 
+<img width="2560" height="1377" alt="image" src="https://github.com/user-attachments/assets/3dd2227b-90eb-4807-9427-c5f5ebb9adac" />
+<img width="2560" height="1371" alt="image" src="https://github.com/user-attachments/assets/b3ecf733-f2bb-4233-8152-4a2123c2f973" />
+<img width="2560" height="1368" alt="image" src="https://github.com/user-attachments/assets/5f018c1e-959b-4f90-bb8a-7a9a38647d72" />
+<img width="2560" height="1368" alt="image" src="https://github.com/user-attachments/assets/9baa2e4d-5659-4705-8c48-7aaf436e46fd" />
+
+
 ShaderLoom is built around a three-panel editor:
 - Left rail for image input, effect selection, and project navigation
 - Center viewport for the rendered OpenGL preview
