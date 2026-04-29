@@ -21,8 +21,10 @@
 #include <cmath>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <iterator>
 #include <optional>
@@ -85,7 +87,8 @@ enum class ExportFormat {
     Png = 0,
     Jpeg,
     Gif,
-    Video,
+    Mp4,
+    WebM,
     Svg,
     Text,
     ThreeJs
@@ -122,6 +125,9 @@ struct AppSettings {
     float vignetteIntensity = 0.45F;
     float crtCurveAmount = 0.12F;
     float phosphorStrength = 0.35F;
+    float exportDurationSeconds = 4.0F;
+    float exportFps = 30.0F;
+    bool exportLoop = true;
 };
 
 void glfwErrorCallback(int error, const char* description) {
@@ -145,6 +151,13 @@ void destroyTexture(LoadedImageState& state) {
     if (state.texture != 0) {
         glDeleteTextures(1, &state.texture);
         state.texture = 0;
+    }
+}
+
+void destroyTextureId(GLuint& texture) {
+    if (texture != 0) {
+        glDeleteTextures(1, &texture);
+        texture = 0;
     }
 }
 
@@ -814,6 +827,8 @@ void syncPreviewSettings(AppSettings& settings, int selectedEffect, float timeSe
     settings.preview.crtCurveAmount = settings.crtCurveAmount;
     settings.preview.phosphorStrength = settings.phosphorStrength;
     settings.preview.timeSeconds = timeSeconds;
+    settings.preview.seamlessLoop = false;
+    settings.preview.loopDurationSeconds = std::max(settings.exportDurationSeconds, 0.001F);
 }
 
 std::string cpuEffectCacheKey(const LoadedImageState& imageState, int selectedEffect, const AppSettings& settings) {
@@ -930,8 +945,10 @@ const char* exportFormatName(ExportFormat format) {
         return "JPEG";
     case ExportFormat::Gif:
         return "GIF";
-    case ExportFormat::Video:
-        return "Video";
+    case ExportFormat::Mp4:
+        return "MP4";
+    case ExportFormat::WebM:
+        return "WebM";
     case ExportFormat::Svg:
         return "SVG";
     case ExportFormat::Text:
@@ -948,8 +965,10 @@ const char* exportExtension(ExportFormat format) {
         return ".jpg";
     case ExportFormat::Gif:
         return ".gif";
-    case ExportFormat::Video:
+    case ExportFormat::Mp4:
         return ".mp4";
+    case ExportFormat::WebM:
+        return ".webm";
     case ExportFormat::Svg:
         return ".svg";
     case ExportFormat::Text:
@@ -966,13 +985,17 @@ bool canExportRaster(ExportFormat format) {
     return format == ExportFormat::Png || format == ExportFormat::Jpeg;
 }
 
+bool canExportAnimation(ExportFormat format) {
+    return format == ExportFormat::Gif || format == ExportFormat::Mp4 || format == ExportFormat::WebM;
+}
+
 #ifdef _WIN32
 std::optional<std::filesystem::path> browseForImage() {
     char filename[MAX_PATH] = {};
     OPENFILENAMEA dialog = {};
     dialog.lStructSize = sizeof(dialog);
     dialog.hwndOwner = nullptr;
-    dialog.lpstrFilter = "Images\0*.png;*.jpg;*.jpeg;*.gif\0PNG\0*.png\0JPEG\0*.jpg;*.jpeg\0GIF\0*.gif\0All Files\0*.*\0";
+    dialog.lpstrFilter = "Images\0*.png;*.jpg;*.jpeg;*.jfif;*.gif\0PNG\0*.png\0JPEG/JFIF\0*.jpg;*.jpeg;*.jfif\0GIF\0*.gif\0All Files\0*.*\0";
     dialog.lpstrFile = filename;
     dialog.nMaxFile = MAX_PATH;
     dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
@@ -990,14 +1013,36 @@ std::optional<std::filesystem::path> browseForExportPath(ExportFormat format, co
     const std::string defaultName = stem + exportExtension(format);
     strncpy_s(filename, defaultName.c_str(), MAX_PATH - 1);
 
+    const char* filter = "PNG\0*.png\0JPEG\0*.jpg;*.jpeg\0All Files\0*.*\0";
+    const char* defaultExtension = format == ExportFormat::Jpeg ? "jpg" : "png";
+    if (format == ExportFormat::Gif) {
+        filter = "GIF\0*.gif\0All Files\0*.*\0";
+        defaultExtension = "gif";
+    } else if (format == ExportFormat::Mp4) {
+        filter = "MP4 Video\0*.mp4\0All Files\0*.*\0";
+        defaultExtension = "mp4";
+    } else if (format == ExportFormat::WebM) {
+        filter = "WebM Video\0*.webm\0All Files\0*.*\0";
+        defaultExtension = "webm";
+    } else if (format == ExportFormat::Svg) {
+        filter = "SVG\0*.svg\0All Files\0*.*\0";
+        defaultExtension = "svg";
+    } else if (format == ExportFormat::Text) {
+        filter = "Text\0*.txt\0All Files\0*.*\0";
+        defaultExtension = "txt";
+    } else if (format == ExportFormat::ThreeJs) {
+        filter = "HTML\0*.html\0All Files\0*.*\0";
+        defaultExtension = "html";
+    }
+
     OPENFILENAMEA dialog = {};
     dialog.lStructSize = sizeof(dialog);
     dialog.hwndOwner = nullptr;
-    dialog.lpstrFilter = "PNG\0*.png\0JPEG\0*.jpg;*.jpeg\0All Files\0*.*\0";
+    dialog.lpstrFilter = filter;
     dialog.lpstrFile = filename;
     dialog.nMaxFile = MAX_PATH;
     dialog.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
-    dialog.lpstrDefExt = format == ExportFormat::Jpeg ? "jpg" : "png";
+    dialog.lpstrDefExt = defaultExtension;
 
     if (GetSaveFileNameA(&dialog) == TRUE) {
         std::filesystem::path selected(filename);
@@ -1237,9 +1282,230 @@ bool formatTile(const char* name, const char* extension, bool selected, const Im
     return clicked;
 }
 
-void exportRenderedImage(const LoadedImageState& imageState, RenderState& renderState, ExportFormat format) {
+std::string quotePath(const std::filesystem::path& path) {
+    return "\"" + path.string() + "\"";
+}
+
+bool ffmpegAvailable() {
+#ifdef _WIN32
+    return std::system("ffmpeg -version >NUL 2>NUL") == 0;
+#else
+    return std::system("ffmpeg -version >/dev/null 2>/dev/null") == 0;
+#endif
+}
+
+std::filesystem::path uniqueFrameDirectory(const std::filesystem::path& outputPath) {
+    const std::filesystem::path parent = std::filesystem::temp_directory_path();
+    const std::string stem = outputPath.stem().string().empty() ? "ShaderLoom_export" : outputPath.stem().string();
+    for (int suffix = 0; suffix < 1000; ++suffix) {
+        const std::string name = suffix == 0
+            ? stem + "_frames"
+            : stem + "_frames_" + std::to_string(suffix);
+        std::filesystem::path candidate = parent / name;
+        if (!std::filesystem::exists(candidate)) {
+            return candidate;
+        }
+    }
+    throw std::runtime_error("Could not find a free frame export directory.");
+}
+
+std::filesystem::path framePath(const std::filesystem::path& directory, int index) {
+    std::ostringstream name;
+    name << "frame_" << std::setw(5) << std::setfill('0') << index << ".png";
+    return directory / name.str();
+}
+
+const ShaderLoom::Image& sourceImageAtTime(const LoadedImageState& imageState, float timeSeconds, bool loop, float loopDurationSeconds) {
+    if (!imageState.isAnimated()) {
+        return imageState.image;
+    }
+
+    int totalDelayMs = 0;
+    for (const ShaderLoom::ImageFrame& frame : imageState.frames) {
+        totalDelayMs += std::max(frame.durationMs, 1);
+    }
+    if (totalDelayMs <= 0) {
+        return imageState.frames.front().image;
+    }
+
+    const float duration = std::max(loopDurationSeconds, 0.001F);
+    const float rawMs = loop
+        ? (std::fmod(std::max(timeSeconds, 0.0F), duration) / duration * static_cast<float>(totalDelayMs))
+        : timeSeconds * 1000.0F;
+    const int positionMs = loop
+        ? static_cast<int>(std::fmod(std::max(rawMs, 0.0F), static_cast<float>(totalDelayMs)))
+        : std::min(static_cast<int>(std::max(rawMs, 0.0F)), totalDelayMs - 1);
+
+    int cursor = 0;
+    for (const ShaderLoom::ImageFrame& frame : imageState.frames) {
+        cursor += std::max(frame.durationMs, 1);
+        if (positionMs < cursor) {
+            return frame.image;
+        }
+    }
+    return imageState.frames.back().image;
+}
+
+ShaderLoom::Image renderFrameForExport(
+    RenderState& renderState,
+    int selectedEffect,
+    const AppSettings& settings,
+    const ShaderLoom::Image& sourceImage,
+    GLuint sourceTexture,
+    GLuint& cpuTexture,
+    float timeSeconds
+) {
+    AppSettings frameSettings = settings;
+    syncPreviewSettings(frameSettings, selectedEffect, timeSeconds, renderState.glyphAtlasTexture);
+    frameSettings.preview.seamlessLoop = settings.exportLoop;
+    frameSettings.preview.loopDurationSeconds = std::max(settings.exportDurationSeconds, 0.001F);
+    frameSettings.preview.context.seamlessLoop = settings.exportLoop;
+    frameSettings.preview.context.loopDurationSeconds = std::max(settings.exportDurationSeconds, 0.001F);
+    frameSettings.context.timeSeconds = timeSeconds;
+    frameSettings.context.seamlessLoop = settings.exportLoop;
+    frameSettings.context.loopDurationSeconds = std::max(settings.exportDurationSeconds, 0.001F);
+
+    GLuint inputTexture = sourceTexture;
+    if (isCpuEffect(selectedEffect)) {
+        ShaderLoom::Image processed = sourceImage;
+        if (selectedEffect == 5) {
+            ShaderLoom::PixelSortEffect pixelSort;
+            processed = pixelSort.apply(sourceImage, frameSettings.pixelSort, frameSettings.context);
+        }
+        uploadImageToTexture(cpuTexture, processed);
+        inputTexture = cpuTexture;
+    }
+
+    GLint textureLimit = 4096;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &textureLimit);
+    const float maxScaleX = static_cast<float>(textureLimit) / static_cast<float>(std::max(sourceImage.width(), 1));
+    const float maxScaleY = static_cast<float>(textureLimit) / static_cast<float>(std::max(sourceImage.height(), 1));
+    const float effectiveScale = std::clamp(frameSettings.preview.renderScale, 1.0F, std::max(1.0F, std::min(maxScaleX, maxScaleY)));
+    const int renderWidth = std::max(1, static_cast<int>(std::round(static_cast<float>(sourceImage.width()) * effectiveScale)));
+    const int renderHeight = std::max(1, static_cast<int>(std::round(static_cast<float>(sourceImage.height()) * effectiveScale)));
+
+    renderState.previewPipeline.render(
+        inputTexture,
+        renderWidth,
+        renderHeight,
+        sourceImage.width(),
+        sourceImage.height(),
+        frameSettings.preview
+    );
+    return renderState.previewPipeline.readOutputImage();
+}
+
+std::string ffmpegCommand(ExportFormat format, const std::filesystem::path& framePattern, const std::filesystem::path& outputPath, int fps, bool loop) {
+    std::ostringstream command;
+    const std::filesystem::path palettePath = outputPath.parent_path() / (outputPath.stem().string() + "_palette.png");
+    if (format == ExportFormat::Gif) {
+        command << "ffmpeg -y -framerate " << fps << " -i " << quotePath(framePattern)
+                << " -vf \"palettegen=stats_mode=full\" " << quotePath(palettePath)
+                << " && ffmpeg -y -framerate " << fps << " -i " << quotePath(framePattern)
+                << " -i " << quotePath(palettePath)
+                << " -lavfi \"paletteuse=dither=sierra2_4a\" ";
+        if (loop) {
+            command << "-loop 0 ";
+        }
+        command << quotePath(outputPath);
+    } else if (format == ExportFormat::Mp4) {
+        command << "ffmpeg -y -framerate " << fps << " -i " << quotePath(framePattern)
+                << " -vf \"scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=lanczos,format=yuv420p\""
+                << " -c:v libx264 -preset slow -crf 14 -movflags +faststart"
+                << " -color_range pc -colorspace bt709 -color_primaries bt709 -color_trc bt709 "
+                << quotePath(outputPath);
+    } else {
+        command << "ffmpeg -y -framerate " << fps << " -i " << quotePath(framePattern)
+                << " -vf \"scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=lanczos,format=yuv444p\""
+                << " -c:v libvpx-vp9 -lossless 1 -pix_fmt yuv444p -row-mt 1 "
+                << quotePath(outputPath);
+    }
+    return command.str();
+}
+
+void exportAnimation(
+    const LoadedImageState& imageState,
+    RenderState& renderState,
+    int selectedEffect,
+    const AppSettings& settings,
+    ExportFormat format
+) {
+    if (!ffmpegAvailable()) {
+        renderState.exportStatus = "FFmpeg was not found on PATH. Install FFmpeg to export GIF, MP4, or WebM.";
+        return;
+    }
+
+    const std::optional<std::filesystem::path> selectedPath = browseForExportPath(format, imageState.path);
+    if (!selectedPath) {
+        return;
+    }
+
+    GLuint animatedSourceTexture = 0;
+    GLuint cpuTexture = 0;
+    std::filesystem::path framesDirectory;
+    try {
+        const float fpsFloat = std::clamp(settings.exportFps, 1.0F, 60.0F);
+        const int fps = std::max(1, static_cast<int>(std::round(fpsFloat)));
+        const float duration = std::clamp(settings.exportDurationSeconds, 0.25F, 30.0F);
+        const int frameCount = std::max(1, static_cast<int>(std::round(duration * static_cast<float>(fps))));
+        framesDirectory = uniqueFrameDirectory(*selectedPath);
+        std::filesystem::create_directories(framesDirectory);
+
+        for (int frame = 0; frame < frameCount; ++frame) {
+            const float timeSeconds = settings.exportLoop
+                ? (duration * static_cast<float>(frame) / static_cast<float>(frameCount))
+                : (static_cast<float>(frame) / static_cast<float>(fps));
+            const ShaderLoom::Image& sourceImage = sourceImageAtTime(imageState, timeSeconds, settings.exportLoop, duration);
+            GLuint sourceTexture = imageState.texture;
+            if (imageState.isAnimated()) {
+                uploadImageToTexture(animatedSourceTexture, sourceImage);
+                sourceTexture = animatedSourceTexture;
+            }
+
+            ShaderLoom::Image frameImage = renderFrameForExport(
+                renderState,
+                selectedEffect,
+                settings,
+                sourceImage,
+                sourceTexture,
+                cpuTexture,
+                timeSeconds
+            );
+            frameImage.writePng(framePath(framesDirectory, frame));
+            glfwPollEvents();
+        }
+
+        const std::filesystem::path pattern = framesDirectory / "frame_%05d.png";
+        const std::string command = ffmpegCommand(format, pattern, *selectedPath, fps, settings.exportLoop);
+        const int result = std::system(command.c_str());
+        std::error_code paletteCleanupError;
+        std::filesystem::remove(selectedPath->parent_path() / (selectedPath->stem().string() + "_palette.png"), paletteCleanupError);
+        if (result != 0) {
+            std::filesystem::remove_all(framesDirectory);
+            renderState.exportStatus = "FFmpeg export failed. No animation file was written.";
+        } else {
+            std::filesystem::remove_all(framesDirectory);
+            renderState.exportStatus = "Exported " + selectedPath->filename().string();
+        }
+    } catch (const std::exception& error) {
+        if (!framesDirectory.empty()) {
+            std::error_code ignored;
+            std::filesystem::remove_all(framesDirectory, ignored);
+        }
+        renderState.exportStatus = error.what();
+    }
+
+    destroyTextureId(animatedSourceTexture);
+    destroyTextureId(cpuTexture);
+}
+
+void exportRenderedImage(LoadedImageState& imageState, RenderState& renderState, int selectedEffect, AppSettings& settings, ExportFormat format) {
     if (!imageState.hasImage()) {
         renderState.exportStatus = "Load an image first.";
+        return;
+    }
+    if (canExportAnimation(format)) {
+        exportAnimation(imageState, renderState, selectedEffect, settings, format);
         return;
     }
     if (!canExportRaster(format)) {
@@ -1257,6 +1523,8 @@ void exportRenderedImage(const LoadedImageState& imageState, RenderState& render
             return;
         }
 
+        syncPreviewSettings(settings, selectedEffect, static_cast<float>(glfwGetTime()), renderState.glyphAtlasTexture);
+        renderPreviewPipeline(imageState, renderState, selectedEffect, settings);
         ShaderLoom::Image output = renderState.previewPipeline.readOutputImage();
         if (format == ExportFormat::Jpeg) {
             output.writeJpeg(*selectedPath);
@@ -1300,7 +1568,7 @@ void drawLeftRail(int& selectedEffect, LoadedImageState& imageState) {
         ImGui::TextDisabled("-");
     }
 
-    if (ImGui::Button("Drop file or click to browse\nPNG, JPG, GIF", ImVec2(-1.0F, 56.0F))) {
+    if (ImGui::Button("Drop file or click to browse\nPNG, JPG, JFIF, GIF", ImVec2(-1.0F, 56.0F))) {
         if (const std::optional<std::filesystem::path> selected = browseForImage()) {
             loadImage(imageState, *selected);
         }
@@ -1333,9 +1601,7 @@ void drawLeftRail(int& selectedEffect, LoadedImageState& imageState) {
     }
 
     ImGui::SetCursorPosY(ImGui::GetWindowHeight() - FooterHeight - 42.0F);
-    sectionTitle("+ Presets");
     ImGui::SetCursorPosY(ImGui::GetWindowHeight() - FooterHeight);
-    ImGui::TextDisabled("Follow   About   Changelog");
     ImGui::EndChild();
 }
 
@@ -1415,7 +1681,7 @@ void drawPreview(const char* effectName, LoadedImageState& imageState, RenderSta
         const ImVec2 emptyMin(contentMin.x + 36.0F, contentMin.y + 72.0F);
         const ImVec2 emptyMax(contentMax.x - 36.0F, contentMax.y - 72.0F);
         drawList->AddRect(emptyMin, emptyMax, IM_COL32(46, 58, 102, 42));
-        const char* emptyText = "Drop a PNG, JPG, or GIF here";
+        const char* emptyText = "Drop a PNG, JPG, JFIF, or GIF here";
         const ImVec2 emptyTextSize = ImGui::CalcTextSize(emptyText);
         drawList->AddText(
             ImVec2((emptyMin.x + emptyMax.x - emptyTextSize.x) * 0.5F, (emptyMin.y + emptyMax.y - emptyTextSize.y) * 0.5F),
@@ -1448,21 +1714,21 @@ void drawPreview(const char* effectName, LoadedImageState& imageState, RenderSta
     ImGui::EndChild();
 }
 
-void drawExportSection(const LoadedImageState& imageState, RenderState& renderState, AppSettings& settings) {
+void drawExportSection(LoadedImageState& imageState, RenderState& renderState, int selectedEffect, AppSettings& settings) {
     if (!sectionToggle("Export", settings.exportOpen)) {
         return;
     }
     ImGui::TextDisabled("Format");
 
-    const char* names[] = {"PNG", "JPEG", "GIF", "Video", "SVG", "Text", "Three.js"};
-    const char* extensions[] = {".png", ".jpg", ".gif", ".mp4", ".svg", ".txt", ".html"};
+    const char* names[] = {"PNG", "JPEG", "GIF", "MP4", "WebM", "SVG", "Text", "Three.js"};
+    const char* extensions[] = {".png", ".jpg", ".gif", ".mp4", ".webm", ".svg", ".txt", ".html"};
     int selectedFormat = static_cast<int>(settings.exportFormat);
 
     const float gap = 6.0F;
     const float tileWidth = (ImGui::GetContentRegionAvail().x - gap) * 0.5F;
     const ImVec2 tileSize(tileWidth, 52.0F);
 
-    for (int i = 0; i < 7; ++i) {
+    for (int i = 0; i < static_cast<int>(std::size(names)); ++i) {
         if (formatTile(names[i], extensions[i], selectedFormat == i, tileSize)) {
             selectedFormat = i;
             settings.exportFormat = static_cast<ExportFormat>(i);
@@ -1475,16 +1741,23 @@ void drawExportSection(const LoadedImageState& imageState, RenderState& renderSt
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
-    ImGui::TextDisabled(canExportRaster(settings.exportFormat) ? "High quality image" : "Planned export format");
+    if (canExportAnimation(settings.exportFormat)) {
+        ImGui::TextDisabled("Looping animation");
+        valueSlider("Duration", &settings.exportDurationSeconds, 0.25F, 30.0F, "%.1f s");
+        valueSlider("FPS", &settings.exportFps, 1.0F, 60.0F, "%.0f");
+        ImGui::Checkbox("Loop", &settings.exportLoop);
+    } else {
+        ImGui::TextDisabled(canExportRaster(settings.exportFormat) ? "High quality image" : "Planned export format");
+    }
 
     const std::string buttonLabel = std::string("Export ") + exportFormatName(settings.exportFormat);
-    if (!canExportRaster(settings.exportFormat)) {
+    if (!canExportRaster(settings.exportFormat) && !canExportAnimation(settings.exportFormat)) {
         ImGui::BeginDisabled();
     }
     if (ImGui::Button(buttonLabel.c_str(), ImVec2(-1.0F, 30.0F))) {
-        exportRenderedImage(imageState, renderState, settings.exportFormat);
+        exportRenderedImage(imageState, renderState, selectedEffect, settings, settings.exportFormat);
     }
-    if (!canExportRaster(settings.exportFormat)) {
+    if (!canExportRaster(settings.exportFormat) && !canExportAnimation(settings.exportFormat)) {
         ImGui::EndDisabled();
     }
 
@@ -1493,7 +1766,7 @@ void drawExportSection(const LoadedImageState& imageState, RenderState& renderSt
     }
 }
 
-void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedImageState& imageState, RenderState& renderState, AppSettings& settings) {
+void drawSettingsRail(const char* effectName, int selectedEffect, LoadedImageState& imageState, RenderState& renderState, AppSettings& settings) {
     ImGui::BeginChild("settings-rail", ImVec2(RightRailWidth, 0.0F), true);
     drawPanelAtmosphere(ImGui::GetWindowDrawList(), ImGui::GetWindowPos(), ImGui::GetWindowSize());
     ImGui::TextUnformatted("- Settings");
@@ -1694,7 +1967,7 @@ void drawSettingsRail(const char* effectName, int selectedEffect, const LoadedIm
         ImGui::PopID();
     }
 
-    drawExportSection(imageState, renderState, settings);
+    drawExportSection(imageState, renderState, selectedEffect, settings);
     ImGui::EndChild();
 }
 

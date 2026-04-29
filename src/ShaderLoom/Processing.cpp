@@ -178,6 +178,18 @@ float hashGrid(int x, int y) noexcept {
     return static_cast<float>(value & 0x00ffffffU) / static_cast<float>(0x01000000U);
 }
 
+int positiveModulo(int value, int period) noexcept {
+    if (period <= 0) {
+        return value;
+    }
+    const int wrapped = value % period;
+    return wrapped < 0 ? wrapped + period : wrapped;
+}
+
+float hashGridTiled(int x, int y, int periodX, int periodY) noexcept {
+    return hashGrid(positiveModulo(x, periodX), positiveModulo(y, periodY));
+}
+
 float valueNoise(float x, float y) noexcept {
     const int ix = static_cast<int>(std::floor(x));
     const int iy = static_cast<int>(std::floor(y));
@@ -190,6 +202,21 @@ float valueNoise(float x, float y) noexcept {
     const float b = hashGrid(ix + 1, iy);
     const float c = hashGrid(ix, iy + 1);
     const float d = hashGrid(ix + 1, iy + 1);
+    return mix(mix(a, b, u), mix(c, d, u), v);
+}
+
+float valueNoiseTiled(float x, float y, int periodX, int periodY) noexcept {
+    const int ix = static_cast<int>(std::floor(x));
+    const int iy = static_cast<int>(std::floor(y));
+    const float fx = x - static_cast<float>(ix);
+    const float fy = y - static_cast<float>(iy);
+    const float u = fade(fx);
+    const float v = fade(fy);
+
+    const float a = hashGridTiled(ix, iy, periodX, periodY);
+    const float b = hashGridTiled(ix + 1, iy, periodX, periodY);
+    const float c = hashGridTiled(ix, iy + 1, periodX, periodY);
+    const float d = hashGridTiled(ix + 1, iy + 1, periodX, periodY);
     return mix(mix(a, b, u), mix(c, d, u), v);
 }
 
@@ -207,9 +234,67 @@ float fbmNoise(float x, float y) noexcept {
     return total / std::max(normalizer, 0.001F);
 }
 
+float fbmNoiseTiled(float x, float y, int periodX, int periodY) noexcept {
+    float total = 0.0F;
+    float amplitude = 0.55F;
+    float normalizer = 0.0F;
+    float frequency = 1.0F;
+    for (int octave = 0; octave < 5; ++octave) {
+        const int octavePeriodX = std::max(1, static_cast<int>(std::round(static_cast<float>(periodX) * frequency)));
+        const int octavePeriodY = std::max(1, static_cast<int>(std::round(static_cast<float>(periodY) * frequency)));
+        total += ((valueNoiseTiled(x * frequency, y * frequency, octavePeriodX, octavePeriodY) * 2.0F) - 1.0F) * amplitude;
+        normalizer += amplitude;
+        amplitude *= 0.5F;
+        frequency *= 2.0F;
+    }
+    return total / std::max(normalizer, 0.001F);
+}
+
 std::pair<float, float> directionVector(float angleDegrees) noexcept {
     const float angle = angleDegrees * Pi / 180.0F;
     return {std::cos(angle), -std::sin(angle)};
+}
+
+int loopPeriodUnits(const RenderContext& context, float scale, float speed) noexcept {
+    if (!context.seamlessLoop || speed <= 0.001F) {
+        return 0;
+    }
+
+    const float duration = std::max(context.loopDurationSeconds, 0.001F);
+    const float desiredTravelUnits = (speed * 90.0F * duration) / std::max(scale, 0.001F);
+    return std::max(1, static_cast<int>(std::round(desiredTravelUnits)));
+}
+
+std::pair<float, float> noiseFieldMotion(const RenderContext& context, float scale, float speed) noexcept {
+    const auto [directionX, directionY] = directionVector(context.processing.noiseFieldAngleDegrees);
+    if (context.seamlessLoop) {
+        const int periodUnits = loopPeriodUnits(context, scale, speed);
+        if (periodUnits <= 0) {
+            return {0.0F, 0.0F};
+        }
+
+        const float duration = std::max(context.loopDurationSeconds, 0.001F);
+        const float phase = std::fmod(std::max(context.timeSeconds, 0.0F), duration) / duration;
+        const float drift = static_cast<float>(periodUnits) * scale * phase;
+        return {directionX * drift, directionY * drift};
+    }
+
+    const float drift = context.timeSeconds * speed * 90.0F;
+    return {directionX * drift, directionY * drift};
+}
+
+float noiseAt(float x, float y, int periodX, int periodY) noexcept {
+    if (periodX <= 0 && periodY <= 0) {
+        return valueNoise(x, y);
+    }
+    return valueNoiseTiled(x, y, periodX, periodY);
+}
+
+float fbmAt(float x, float y, int periodX, int periodY) noexcept {
+    if (periodX <= 0 && periodY <= 0) {
+        return fbmNoise(x, y);
+    }
+    return fbmNoiseTiled(x, y, periodX, periodY);
 }
 
 float noiseFieldAmount(int x, int y, const RenderContext& context) noexcept {
@@ -220,17 +305,23 @@ float noiseFieldAmount(int x, int y, const RenderContext& context) noexcept {
 
     const float scale = std::clamp(processing.noiseFieldScale, 4.0F, 120.0F);
     const float speed = std::clamp(processing.noiseFieldSpeed, 0.0F, 4.0F);
+    const auto [motionX, motionY] = noiseFieldMotion(context, scale, speed);
+    const float sampleX = static_cast<float>(x) - motionX;
+    const float sampleY = static_cast<float>(y) - motionY;
     const auto [directionX, directionY] = directionVector(processing.noiseFieldAngleDegrees);
-    const float drift = context.timeSeconds * speed * 90.0F;
-    const float sampleX = static_cast<float>(x) - (directionX * drift);
-    const float sampleY = static_cast<float>(y) - (directionY * drift);
-    const float baseX = sampleX / scale;
-    const float baseY = sampleY / scale;
-    const float warpX = (valueNoise((baseX * 0.35F) + 17.3F, (baseY * 0.35F) - 9.7F) * 2.0F) - 1.0F;
-    const float warpY = (valueNoise((baseX * 0.35F) - 41.1F, (baseY * 0.35F) + 23.8F) * 2.0F) - 1.0F;
-    const float field = fbmNoise(baseX + (warpX * 0.75F), baseY + (warpY * 0.75F));
+    const float perpendicularX = -directionY;
+    const float perpendicularY = directionX;
+    const int period = loopPeriodUnits(context, scale, speed);
+    const float baseX = ((sampleX * directionX) + (sampleY * directionY)) / scale;
+    const float baseY = ((sampleX * perpendicularX) + (sampleY * perpendicularY)) / scale;
+    const float warpX = (noiseAt((baseX * 0.35F) + 17.3F, (baseY * 0.35F) - 9.7F, period, 0) * 2.0F) - 1.0F;
+    const float warpY = (noiseAt((baseX * 0.35F) - 41.1F, (baseY * 0.35F) + 23.8F, period, 0) * 2.0F) - 1.0F;
+    const float field = fbmAt(baseX + (warpX * 0.75F), baseY + (warpY * 0.75F), period, 0);
     const float fineScale = std::max(scale * 0.22F, 2.0F);
-    const float fine = (valueNoise(sampleX / fineScale, sampleY / fineScale) * 2.0F) - 1.0F;
+    const int finePeriod = period > 0 ? std::max(1, static_cast<int>(std::round((static_cast<float>(period) * scale) / fineScale))) : 0;
+    const float fineX = ((sampleX * directionX) + (sampleY * directionY)) / fineScale;
+    const float fineY = ((sampleX * perpendicularX) + (sampleY * perpendicularY)) / fineScale;
+    const float fine = (noiseAt(fineX, fineY, finePeriod, 0) * 2.0F) - 1.0F;
     const float strength = std::clamp(processing.noiseFieldStrength, 0.0F, 1.0F);
     return ((field * 0.82F) + (fine * 0.18F)) * strength * 0.22F;
 }
@@ -243,16 +334,19 @@ std::pair<float, float> noiseFieldVector(int x, int y, const RenderContext& cont
 
     const float scale = std::clamp(processing.noiseFieldScale, 4.0F, 120.0F);
     const float speed = std::clamp(processing.noiseFieldSpeed, 0.0F, 4.0F);
+    const auto [motionX, motionY] = noiseFieldMotion(context, scale, speed);
+    const float sampleX = static_cast<float>(x) - motionX;
+    const float sampleY = static_cast<float>(y) - motionY;
     const auto [directionX, directionY] = directionVector(processing.noiseFieldAngleDegrees);
-    const float drift = context.timeSeconds * speed * 90.0F;
-    const float sampleX = static_cast<float>(x) - (directionX * drift);
-    const float sampleY = static_cast<float>(y) - (directionY * drift);
-    const float baseX = sampleX / scale;
-    const float baseY = sampleY / scale;
-    const float warpX = (valueNoise((baseX * 0.35F) + 17.3F, (baseY * 0.35F) - 9.7F) * 2.0F) - 1.0F;
-    const float warpY = (valueNoise((baseX * 0.35F) - 41.1F, (baseY * 0.35F) + 23.8F) * 2.0F) - 1.0F;
-    const float fieldX = fbmNoise(baseX + (warpX * 0.75F) + 31.7F, baseY + (warpY * 0.75F) - 12.4F);
-    const float fieldY = fbmNoise(baseX + (warpX * 0.75F) - 18.6F, baseY + (warpY * 0.75F) + 46.2F);
+    const float perpendicularX = -directionY;
+    const float perpendicularY = directionX;
+    const int period = loopPeriodUnits(context, scale, speed);
+    const float baseX = ((sampleX * directionX) + (sampleY * directionY)) / scale;
+    const float baseY = ((sampleX * perpendicularX) + (sampleY * perpendicularY)) / scale;
+    const float warpX = (noiseAt((baseX * 0.35F) + 17.3F, (baseY * 0.35F) - 9.7F, period, 0) * 2.0F) - 1.0F;
+    const float warpY = (noiseAt((baseX * 0.35F) - 41.1F, (baseY * 0.35F) + 23.8F, period, 0) * 2.0F) - 1.0F;
+    const float fieldX = fbmAt(baseX + (warpX * 0.75F) + 31.7F, baseY + (warpY * 0.75F) - 12.4F, period, 0);
+    const float fieldY = fbmAt(baseX + (warpX * 0.75F) - 18.6F, baseY + (warpY * 0.75F) + 46.2F, period, 0);
     const float amount = std::clamp(processing.noiseFieldDistortion, 0.0F, 80.0F);
     return {fieldX * amount, fieldY * amount};
 }

@@ -28,7 +28,7 @@ ShaderLoom is built around a three-panel editor:
 - Center viewport for the rendered OpenGL preview
 - Right rail for effect controls, image adjustments, processing, post-processing, and export
 
-The editor accepts PNG, JPG, JPEG, and GIF input through drag-and-drop, the Windows file picker, or an optional startup image path.
+The editor accepts PNG, JPG, JPEG, JFIF, and GIF input through drag-and-drop, the Windows file picker, or an optional startup image path.
 
 ---
 
@@ -67,7 +67,8 @@ The editor accepts PNG, JPG, JPEG, and GIF input through drag-and-drop, the Wind
 - Zoom and pan in the preview without mutating source or export dimensions
 - Windows file picker support for input and output
 - PNG and JPEG export from the final rendered framebuffer
-- Planned export targets visible in the UI: GIF, Video, SVG, Text, and Three.js
+- GIF, MP4, and WebM animation export through FFmpeg
+- Planned export targets visible in the UI: SVG, Text, and Three.js
 
 ---
 
@@ -128,6 +129,8 @@ Run the editor with an optional startup image:
 Notes:
 - The core build requires stb headers. Install stb through vcpkg or pass `-DSTB_INCLUDE_DIR=<path>`.
 - The GUI build expects OpenGL, glfw3, and imgui from the configured vcpkg toolchain.
-- PNG and JPEG export are currently wired. Other export tiles are visible as planned formats.
+- PNG and JPEG still export are wired.
+- GIF, MP4, and WebM animation export require `ffmpeg` on PATH.
+- SVG, Text, and Three.js export tiles are visible as planned formats.
 
 ---

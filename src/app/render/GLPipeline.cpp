@@ -192,6 +192,8 @@ uniform int uNoiseFieldDirection;
 uniform float uNoiseFieldAngleDegrees;
 uniform float uNoiseFieldDistortion;
 uniform float uTime;
+uniform int uSeamlessLoop;
+uniform float uLoopDuration;
 
 float luma(vec3 color) {
     return dot(color, vec3(0.299, 0.587, 0.114));
@@ -239,6 +241,17 @@ float hashGrid(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
 }
 
+float hashGridTiled(vec2 p, vec2 period) {
+    vec2 wrapped = p;
+    if (period.x > 0.0) {
+        wrapped.x = mod(wrapped.x, max(period.x, 1.0));
+    }
+    if (period.y > 0.0) {
+        wrapped.y = mod(wrapped.y, max(period.y, 1.0));
+    }
+    return hashGrid(wrapped);
+}
+
 float valueNoise(vec2 p) {
     vec2 i = floor(p);
     vec2 f = fract(p);
@@ -250,16 +263,35 @@ float valueNoise(vec2 p) {
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
-float fbmNoise(vec2 p) {
+float valueNoiseTiled(vec2 p, vec2 period) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float a = hashGridTiled(i, period);
+    float b = hashGridTiled(i + vec2(1.0, 0.0), period);
+    float c = hashGridTiled(i + vec2(0.0, 1.0), period);
+    float d = hashGridTiled(i + vec2(1.0, 1.0), period);
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+float noiseAt(vec2 p, vec2 period) {
+    if (period.x <= 0.0 && period.y <= 0.0) {
+        return valueNoise(p);
+    }
+    return valueNoiseTiled(p, period);
+}
+
+float fbmNoise(vec2 p, vec2 period) {
     float total = 0.0;
     float amplitude = 0.55;
     float normalizer = 0.0;
     float frequency = 1.0;
     for (int octave = 0; octave < 5; ++octave) {
-        total += (valueNoise(p * frequency) * 2.0 - 1.0) * amplitude;
+        vec2 octavePeriod = period.x <= 0.0 || period.y <= 0.0 ? vec2(0.0) : max(round(period * frequency), vec2(1.0));
+        total += (noiseAt(p * frequency, octavePeriod) * 2.0 - 1.0) * amplitude;
         normalizer += amplitude;
         amplitude *= 0.5;
-        frequency *= 2.17;
+        frequency *= 2.0;
     }
     return total / max(normalizer, 0.001);
 }
@@ -267,6 +299,31 @@ float fbmNoise(vec2 p) {
 vec2 directionVector(float angleDegrees) {
     float angle = radians(angleDegrees);
     return vec2(cos(angle), -sin(angle));
+}
+
+float loopPeriodUnits(float scale, float speed) {
+    if (uSeamlessLoop != 1 || speed <= 0.001) {
+        return 0.0;
+    }
+
+    float duration = max(uLoopDuration, 0.001);
+    float desiredTravelUnits = speed * 90.0 * duration / max(scale, 0.001);
+    return max(round(desiredTravelUnits), 1.0);
+}
+
+vec2 loopMotion(vec2 direction, float scale, float speed) {
+    if (uSeamlessLoop == 1) {
+        float periodUnits = loopPeriodUnits(scale, speed);
+        if (periodUnits <= 0.0) {
+            return vec2(0.0);
+        }
+
+        float duration = max(uLoopDuration, 0.001);
+        float phase = mod(max(uTime, 0.0), duration) / duration;
+        return direction * periodUnits * scale * phase;
+    }
+
+    return direction * uTime * speed * 90.0;
 }
 
 float noiseFieldAmount(vec2 uv) {
@@ -277,15 +334,21 @@ float noiseFieldAmount(vec2 uv) {
     float scale = clamp(uNoiseFieldScale, 4.0, 120.0);
     float speed = clamp(uNoiseFieldSpeed, 0.0, 4.0);
     vec2 screenUv = vec2(uv.x, 1.0 - uv.y);
-    vec2 samplePx = (screenUv * uResolution) - (directionVector(uNoiseFieldAngleDegrees) * uTime * speed * 90.0);
-    vec2 base = samplePx / scale;
+    vec2 direction = directionVector(uNoiseFieldAngleDegrees);
+    vec2 perpendicular = vec2(-direction.y, direction.x);
+    vec2 samplePx = (screenUv * uResolution) - loopMotion(direction, scale, speed);
+    vec2 base = vec2(dot(samplePx, direction), dot(samplePx, perpendicular)) / scale;
+    float periodUnits = loopPeriodUnits(scale, speed);
+    vec2 period = periodUnits > 0.0 ? vec2(periodUnits, 0.0) : vec2(0.0);
     vec2 warp = vec2(
-        valueNoise(base * 0.35 + vec2(17.3, -9.7)),
-        valueNoise(base * 0.35 + vec2(-41.1, 23.8))
+        noiseAt(base * 0.35 + vec2(17.3, -9.7), period),
+        noiseAt(base * 0.35 + vec2(-41.1, 23.8), period)
     ) * 2.0 - 1.0;
-    float field = fbmNoise(base + warp * 0.75);
+    float field = fbmNoise(base + warp * 0.75, period);
     float fineScale = max(scale * 0.22, 2.0);
-    float fine = valueNoise(samplePx / fineScale) * 2.0 - 1.0;
+    vec2 finePeriod = periodUnits > 0.0 ? vec2(max(round(periodUnits * scale / fineScale), 1.0), 0.0) : vec2(0.0);
+    vec2 fineCoords = vec2(dot(samplePx, direction), dot(samplePx, perpendicular)) / fineScale;
+    float fine = noiseAt(fineCoords, finePeriod) * 2.0 - 1.0;
     return (field * 0.82 + fine * 0.18) * clamp(uNoiseFieldStrength, 0.0, 1.0) * 0.22 * max(uNoiseFieldBoost, 0.0);
 }
 
@@ -297,15 +360,19 @@ vec2 noiseFieldVector(vec2 uv) {
     float scale = clamp(uNoiseFieldScale, 4.0, 120.0);
     float speed = clamp(uNoiseFieldSpeed, 0.0, 4.0);
     vec2 screenUv = vec2(uv.x, 1.0 - uv.y);
-    vec2 samplePx = (screenUv * uResolution) - (directionVector(uNoiseFieldAngleDegrees) * uTime * speed * 90.0);
-    vec2 base = samplePx / scale;
+    vec2 direction = directionVector(uNoiseFieldAngleDegrees);
+    vec2 perpendicular = vec2(-direction.y, direction.x);
+    vec2 samplePx = (screenUv * uResolution) - loopMotion(direction, scale, speed);
+    vec2 base = vec2(dot(samplePx, direction), dot(samplePx, perpendicular)) / scale;
+    float periodUnits = loopPeriodUnits(scale, speed);
+    vec2 period = periodUnits > 0.0 ? vec2(periodUnits, 0.0) : vec2(0.0);
     vec2 warp = vec2(
-        valueNoise(base * 0.35 + vec2(17.3, -9.7)),
-        valueNoise(base * 0.35 + vec2(-41.1, 23.8))
+        noiseAt(base * 0.35 + vec2(17.3, -9.7), period),
+        noiseAt(base * 0.35 + vec2(-41.1, 23.8), period)
     ) * 2.0 - 1.0;
     vec2 field = vec2(
-        fbmNoise(base + warp * 0.75 + vec2(31.7, -12.4)),
-        fbmNoise(base + warp * 0.75 + vec2(-18.6, 46.2))
+        fbmNoise(base + warp * 0.75 + vec2(31.7, -12.4), period),
+        fbmNoise(base + warp * 0.75 + vec2(-18.6, 46.2), period)
     );
     return field * clamp(uNoiseFieldDistortion, 0.0, 80.0);
 }
@@ -842,6 +909,8 @@ uniform float uScanlineIntensity;
 uniform float uVignetteIntensity;
 uniform float uCrtCurveAmount;
 uniform float uPhosphorStrength;
+uniform int uSeamlessLoop;
+uniform float uLoopDuration;
 
 float luma(vec3 color) {
     return dot(color, vec3(0.299, 0.587, 0.114));
@@ -942,9 +1011,14 @@ void main() {
         float grainScale = max(uGrainSize, 0.75);
         vec2 grainPixel = gl_FragCoord.xy / grainScale;
         float grainTime = uTime * max(uGrainSpeed, 1.0);
+        float loopFrames = max(floor(max(uLoopDuration, 0.001) * max(uGrainSpeed, 1.0)), 1.0);
+        if (uSeamlessLoop == 1) {
+            grainTime = mod(max(uTime, 0.0), max(uLoopDuration, 0.001)) / max(uLoopDuration, 0.001) * loopFrames;
+        }
         float frame = floor(grainTime);
+        float nextFrame = uSeamlessLoop == 1 ? mod(frame + 1.0, loopFrames) : frame + 1.0;
         float blend = smoothstep(0.0, 1.0, fract(grainTime));
-        float grain = mix(grainSample(grainPixel, frame, uGrainType), grainSample(grainPixel, frame + 1.0, uGrainType), blend);
+        float grain = mix(grainSample(grainPixel, frame, uGrainType), grainSample(grainPixel, nextFrame, uGrainType), blend);
         float tone = luma(color);
         float highlightDamping = uGrainType == 2 ? 0.35 : 0.55;
         float tonalMask = smoothstep(0.02, 0.35, tone) * (1.0 - smoothstep(0.72, 1.0, tone) * highlightDamping);
@@ -952,9 +1026,9 @@ void main() {
         float chromaAmount = uGrainType == 3 ? 0.0 : uGrainType == 2 ? 0.10 : 0.18;
         float amount = (uGrainIntensity / 100.0) * typeAmount * tonalMask;
         vec3 chroma = vec3(
-            grainSample(grainPixel + vec2(19.3, 7.1), frame, uGrainType),
-            grainSample(grainPixel + vec2(5.7, 31.9), frame, uGrainType),
-            grainSample(grainPixel + vec2(37.1, 17.4), frame, uGrainType)
+            mix(grainSample(grainPixel + vec2(19.3, 7.1), frame, uGrainType), grainSample(grainPixel + vec2(19.3, 7.1), nextFrame, uGrainType), blend),
+            mix(grainSample(grainPixel + vec2(5.7, 31.9), frame, uGrainType), grainSample(grainPixel + vec2(5.7, 31.9), nextFrame, uGrainType), blend),
+            mix(grainSample(grainPixel + vec2(37.1, 17.4), frame, uGrainType), grainSample(grainPixel + vec2(37.1, 17.4), nextFrame, uGrainType), blend)
         );
         color += vec3(grain) * amount;
         color += chroma * amount * chromaAmount;
@@ -1332,6 +1406,8 @@ GLuint PreviewPipeline::render(
         preprocessShader_.setFloat("uNoiseFieldAngleDegrees", settings.context.processing.noiseFieldAngleDegrees);
         preprocessShader_.setFloat("uNoiseFieldDistortion", settings.context.processing.noiseFieldDistortion);
         preprocessShader_.setFloat("uTime", settings.timeSeconds);
+        preprocessShader_.setInt("uSeamlessLoop", settings.seamlessLoop ? 1 : 0);
+        preprocessShader_.setFloat("uLoopDuration", settings.loopDurationSeconds);
         quad_.draw();
         glBindTexture(GL_TEXTURE_2D, 0);
         glUseProgramPtr(0);
@@ -1433,6 +1509,8 @@ GLuint PreviewPipeline::render(
     postShader_.setInt("uSource", 0);
     postShader_.setVec2("uResolution", static_cast<float>(logicalRenderWidth), static_cast<float>(logicalRenderHeight));
     postShader_.setFloat("uTime", settings.timeSeconds);
+    postShader_.setInt("uSeamlessLoop", settings.seamlessLoop ? 1 : 0);
+    postShader_.setFloat("uLoopDuration", settings.loopDurationSeconds);
     postShader_.setInt("uBloom", settings.bloom ? 1 : 0);
     postShader_.setInt("uGrain", settings.grain ? 1 : 0);
     postShader_.setInt("uChromatic", settings.chromatic ? 1 : 0);
@@ -1471,15 +1549,7 @@ Image PreviewPipeline::readOutputImage() const {
     glReadPixels(0, 0, outputTexture_.width(), outputTexture_.height(), GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
     Framebuffer::bindDefault();
 
-    const int stride = outputTexture_.width() * 4;
-    std::vector<std::uint8_t> flipped(pixels.size());
-    for (int y = 0; y < outputTexture_.height(); ++y) {
-        const std::size_t sourceOffset = static_cast<std::size_t>((outputTexture_.height() - 1 - y) * stride);
-        const std::size_t targetOffset = static_cast<std::size_t>(y * stride);
-        std::copy_n(pixels.data() + sourceOffset, static_cast<std::size_t>(stride), flipped.data() + targetOffset);
-    }
-
-    return Image(outputTexture_.width(), outputTexture_.height(), std::move(flipped));
+    return Image(outputTexture_.width(), outputTexture_.height(), std::move(pixels));
 }
 
 bool PreviewPipeline::hasOutput() const noexcept {

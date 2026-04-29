@@ -33,6 +33,8 @@ struct RenderContext {
     AdjustmentSettings adjustments;
     ProcessingSettings processing;
     float timeSeconds = 0.0F;
+    bool seamlessLoop = false;
+    float loopDurationSeconds = 4.0F;
 };
 
 [[nodiscard]] float luminance(Pixel pixel) noexcept;

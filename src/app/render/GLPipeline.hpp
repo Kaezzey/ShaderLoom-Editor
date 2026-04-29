@@ -103,6 +103,8 @@ struct PreviewRenderSettings {
     float crtCurveAmount = 0.12F;
     float phosphorStrength = 0.35F;
     float timeSeconds = 0.0F;
+    bool seamlessLoop = false;
+    float loopDurationSeconds = 4.0F;
 };
 
 class ShaderProgram {
