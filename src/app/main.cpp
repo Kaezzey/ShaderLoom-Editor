@@ -728,9 +728,6 @@ ShaderLoom::Image renderAsciiRaster(
     ShaderLoom::Image output(source.width(), source.height());
     std::vector<std::uint8_t>& pixels = output.pixels();
     std::fill(pixels.begin(), pixels.end(), 0);
-    for (std::size_t i = 3; i < pixels.size(); i += 4) {
-        pixels[i] = 255;
-    }
 
     const int columns = std::max(1, result.columns);
     const int rows = std::max(1, result.rows);

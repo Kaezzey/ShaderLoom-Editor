@@ -449,6 +449,8 @@ uniform int uOutputWidth;
 uniform int uCharacterSet;
 uniform int uAtlasColumns;
 uniform int uAtlasRows;
+uniform int uPhosphor;
+uniform float uPhosphorStrength;
 
 float luma(vec3 color) {
     return dot(color, vec3(0.299, 0.587, 0.114));
@@ -538,7 +540,7 @@ void main() {
     float glyphScale = clamp(1.18 - (uSpacing * 0.24), 0.38, 1.22);
     vec2 glyphUv = ((local - 0.5) / glyphScale) + 0.5;
     if (glyphUv.x < 0.0 || glyphUv.y < 0.0 || glyphUv.x > 1.0 || glyphUv.y > 1.0) {
-        fragColor = vec4(0.0, 0.0, 0.0, source.a);
+        fragColor = vec4(0.0);
         return;
     }
 
@@ -552,7 +554,15 @@ void main() {
     float distanceValue = texture(uGlyphAtlas, atlasUv).a;
     float edgeWidth = max(fwidth(distanceValue) * 1.5, 0.003);
     float glyphAlpha = smoothstep(0.5 - edgeWidth, 0.5 + edgeWidth, distanceValue);
-    fragColor = vec4(source.rgb * glyphAlpha, source.a);
+    vec3 color = source.rgb;
+    if (uPhosphor == 1) {
+        int stripe = int(mod(floor(glyphUv.x * 3.0), 3.0));
+        vec3 mask = stripe == 0 ? vec3(1.0, 1.0 - uPhosphorStrength, 1.0 - uPhosphorStrength)
+                  : stripe == 1 ? vec3(1.0 - uPhosphorStrength, 1.0, 1.0 - uPhosphorStrength)
+                                : vec3(1.0 - uPhosphorStrength, 1.0 - uPhosphorStrength, 1.0);
+        color *= mask;
+    }
+    fragColor = vec4(color, source.a * glyphAlpha);
 }
 )";
 
@@ -675,8 +685,7 @@ void main() {
         distanceValue = abs(local.y);
     }
     float edge = 1.0 - smoothstep(max(radius - 0.12, 0.0), radius, distanceValue);
-    vec3 color = mix(vec3(0.0), source.rgb, edge);
-    fragColor = vec4(color, source.a);
+    fragColor = vec4(source.rgb, source.a * edge);
 }
 )";
 
@@ -720,7 +729,7 @@ void main() {
         distanceValue = abs(local.x) + abs(local.y);
     }
     float mask = 1.0 - smoothstep(max(radius - 0.08, 0.0), radius, distanceValue);
-    fragColor = vec4(mix(vec3(0.0), source.rgb, mask), source.a);
+    fragColor = vec4(source.rgb, source.a * mask);
 }
 )";
 
@@ -970,41 +979,73 @@ vec2 crtUv(vec2 uv) {
     return centered * 0.5 + 0.5;
 }
 
+vec4 premulSample(vec2 uv) {
+    vec4 sampleColor = texture(uSource, clamp(uv, vec2(0.0), vec2(1.0)));
+    return vec4(sampleColor.rgb * sampleColor.a, sampleColor.a);
+}
+
+vec3 straightRgb(vec4 premulColor) {
+    return premulColor.a > 0.001 ? premulColor.rgb / premulColor.a : vec3(0.0);
+}
+
+void clampPremul(inout vec4 premulColor) {
+    premulColor.a = clamp(premulColor.a, 0.0, 1.0);
+    premulColor.rgb = clamp(premulColor.rgb, vec3(0.0), vec3(premulColor.a));
+}
+
 void main() {
     vec2 uv = vTexCoord;
     if (uCrtCurve == 1) {
         uv = crtUv(uv);
         if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
-            fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+            fragColor = vec4(0.0);
             return;
         }
     }
 
     vec2 texel = 1.0 / max(uResolution, vec2(1.0));
-    vec4 base = texture(uSource, uv);
-    vec3 color = base.rgb;
+    vec4 color = premulSample(uv);
 
     if (uChromatic == 1) {
         vec2 direction = normalize(uv - 0.5 + vec2(0.0001));
         vec2 offset = direction * uChromaticAmount * texel;
-        color.r = texture(uSource, clamp(uv + offset, vec2(0.0), vec2(1.0))).r;
-        color.b = texture(uSource, clamp(uv - offset, vec2(0.0), vec2(1.0))).b;
+        vec4 redSample = premulSample(uv + offset);
+        vec4 greenSample = color;
+        vec4 blueSample = premulSample(uv - offset);
+        color = vec4(
+            redSample.r,
+            greenSample.g,
+            blueSample.b,
+            max(max(redSample.a, greenSample.a), blueSample.a)
+        );
+        clampPremul(color);
     }
 
     if (uBloom == 1) {
-        vec3 bloom = vec3(0.0);
+        vec4 bloom = vec4(0.0);
         float total = 0.0;
         float radius = max(uBloomRadius, 1.0);
-        for (int y = -2; y <= 2; ++y) {
-            for (int x = -2; x <= 2; ++x) {
+        for (int y = -3; y <= 3; ++y) {
+            for (int x = -3; x <= 3; ++x) {
                 vec2 o = vec2(float(x), float(y)) * texel * radius;
-                vec3 sampleColor = texture(uSource, clamp(uv + o, vec2(0.0), vec2(1.0))).rgb;
-                float bright = smoothstep(uBloomThreshold, uBloomThreshold + max(uBloomSoftThreshold, 0.001), luma(sampleColor));
-                bloom += sampleColor * bright;
-                total += 1.0;
+                vec4 sampleColor = premulSample(uv + o);
+                vec3 visibleColor = straightRgb(sampleColor);
+                float bright = smoothstep(
+                    uBloomThreshold,
+                    uBloomThreshold + max(uBloomSoftThreshold, 0.001),
+                    luma(visibleColor)
+                );
+                float kernel = exp(-dot(vec2(float(x), float(y)), vec2(float(x), float(y))) * 0.35);
+                bloom += sampleColor * bright * kernel;
+                total += kernel;
             }
         }
-        color += (bloom / max(total, 1.0)) * uBloomIntensity;
+        bloom /= max(total, 0.001);
+        float bloomAmount = max(uBloomIntensity, 0.0);
+        color.rgb += bloom.rgb * bloomAmount;
+        color.a = clamp(color.a + bloom.a * bloomAmount * (1.0 - color.a), 0.0, 1.0);
+        color.a = max(color.a, clamp(max(max(color.r, color.g), color.b), 0.0, 1.0));
+        clampPremul(color);
     }
 
     if (uGrain == 1) {
@@ -1019,7 +1060,8 @@ void main() {
         float nextFrame = uSeamlessLoop == 1 ? mod(frame + 1.0, loopFrames) : frame + 1.0;
         float blend = smoothstep(0.0, 1.0, fract(grainTime));
         float grain = mix(grainSample(grainPixel, frame, uGrainType), grainSample(grainPixel, nextFrame, uGrainType), blend);
-        float tone = luma(color);
+        vec3 visibleColor = straightRgb(color);
+        float tone = luma(visibleColor);
         float highlightDamping = uGrainType == 2 ? 0.35 : 0.55;
         float tonalMask = smoothstep(0.02, 0.35, tone) * (1.0 - smoothstep(0.72, 1.0, tone) * highlightDamping);
         float typeAmount = uGrainType == 1 ? 0.34 : uGrainType == 2 ? 0.50 : 0.42;
@@ -1030,19 +1072,19 @@ void main() {
             mix(grainSample(grainPixel + vec2(5.7, 31.9), frame, uGrainType), grainSample(grainPixel + vec2(5.7, 31.9), nextFrame, uGrainType), blend),
             mix(grainSample(grainPixel + vec2(37.1, 17.4), frame, uGrainType), grainSample(grainPixel + vec2(37.1, 17.4), nextFrame, uGrainType), blend)
         );
-        color += vec3(grain) * amount;
-        color += chroma * amount * chromaAmount;
+        visibleColor += (vec3(grain) + chroma * chromaAmount) * amount * smoothstep(0.0, 0.08, color.a);
+        color.rgb = clamp(visibleColor, vec3(0.0), vec3(1.0)) * color.a;
     }
 
     if (uScanlines == 1) {
         float line = 0.5 + 0.5 * sin(uv.y * uResolution.y * 3.14159265);
-        color *= 1.0 - (1.0 - line) * uScanlineIntensity;
+        color.rgb *= 1.0 - (1.0 - line) * uScanlineIntensity;
     }
 
     if (uVignette == 1) {
         float d = distance(uv, vec2(0.5));
         float vig = smoothstep(0.35, 0.75, d);
-        color *= 1.0 - vig * uVignetteIntensity;
+        color.rgb *= 1.0 - vig * uVignetteIntensity;
     }
 
     if (uPhosphor == 1) {
@@ -1050,10 +1092,11 @@ void main() {
         vec3 mask = stripe == 0 ? vec3(1.0, 1.0 - uPhosphorStrength, 1.0 - uPhosphorStrength)
                   : stripe == 1 ? vec3(1.0 - uPhosphorStrength, 1.0, 1.0 - uPhosphorStrength)
                                 : vec3(1.0 - uPhosphorStrength, 1.0 - uPhosphorStrength, 1.0);
-        color *= mask;
+        color.rgb *= mask;
     }
 
-    fragColor = vec4(clamp(color, vec3(0.0), vec3(1.0)), base.a);
+    clampPremul(color);
+    fragColor = vec4(clamp(straightRgb(color), vec3(0.0), vec3(1.0)), color.a);
 }
 )";
 
@@ -1375,7 +1418,7 @@ GLuint PreviewPipeline::render(
         preprocessFramebuffer_.bind();
         glViewport(0, 0, outputWidth, outputHeight);
         glDisable(GL_BLEND);
-        glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+        glClearColor(0.0F, 0.0F, 0.0F, 0.0F);
         glClear(GL_COLOR_BUFFER_BIT);
 
         preprocessShader_.use();
@@ -1420,7 +1463,7 @@ GLuint PreviewPipeline::render(
     effectFramebuffer_.bind();
     glViewport(0, 0, outputWidth, outputHeight);
     glDisable(GL_BLEND);
-    glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+    glClearColor(0.0F, 0.0F, 0.0F, 0.0F);
     glClear(GL_COLOR_BUFFER_BIT);
 
     ShaderProgram* effectShader = &passthroughShader_;
@@ -1455,6 +1498,8 @@ GLuint PreviewPipeline::render(
         effectShader->setInt("uCharacterSet", settings.ascii.characterSet);
         effectShader->setInt("uAtlasColumns", settings.ascii.atlasColumns);
         effectShader->setInt("uAtlasRows", settings.ascii.atlasRows);
+        effectShader->setInt("uPhosphor", settings.phosphor ? 1 : 0);
+        effectShader->setFloat("uPhosphorStrength", settings.phosphorStrength);
     } else if (settings.effect == PreviewEffect::Dither) {
         effectShader->setInt("uAlgorithm", settings.dither.algorithm);
         effectShader->setFloat("uIntensity", settings.dither.intensity);
@@ -1501,7 +1546,7 @@ GLuint PreviewPipeline::render(
     outputFramebuffer_.bind();
     glViewport(0, 0, outputWidth, outputHeight);
     glDisable(GL_BLEND);
-    glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+    glClearColor(0.0F, 0.0F, 0.0F, 0.0F);
     glClear(GL_COLOR_BUFFER_BIT);
     postShader_.use();
     glActiveTexturePtr(GL_TEXTURE0);
@@ -1517,7 +1562,7 @@ GLuint PreviewPipeline::render(
     postShader_.setInt("uScanlines", settings.scanlines ? 1 : 0);
     postShader_.setInt("uVignette", settings.vignette ? 1 : 0);
     postShader_.setInt("uCrtCurve", settings.crtCurve ? 1 : 0);
-    postShader_.setInt("uPhosphor", settings.phosphor ? 1 : 0);
+    postShader_.setInt("uPhosphor", settings.phosphor && settings.effect != PreviewEffect::Ascii ? 1 : 0);
     postShader_.setFloat("uBloomThreshold", settings.bloomThreshold);
     postShader_.setFloat("uBloomSoftThreshold", settings.bloomSoftThreshold);
     postShader_.setFloat("uBloomIntensity", settings.bloomIntensity);

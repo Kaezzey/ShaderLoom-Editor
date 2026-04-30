@@ -128,7 +128,6 @@ void AsciiEffect::writeSvg(const AsciiResult& result, const std::filesystem::pat
 
     output << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" << sourceWidth
            << "\" height=\"" << sourceHeight << "\" viewBox=\"0 0 " << sourceWidth << ' ' << sourceHeight << "\">\n";
-    output << "<rect width=\"100%\" height=\"100%\" fill=\"#000\"/>\n";
     output << "<g fill=\"#fff\" font-family=\"Consolas, monospace\" font-size=\"" << fontSize << "\">\n";
     for (int row = 0; row < result.rows; ++row) {
         const float y = (static_cast<float>(row) + 1.0F) * lineHeight;
