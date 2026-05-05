@@ -28,7 +28,7 @@ ShaderLoom is built around a three-panel editor:
 - Center viewport for the rendered OpenGL preview
 - Right rail for effect controls, image adjustments, processing, post-processing, and export
 
-The editor accepts PNG, JPG, JPEG, JFIF, and GIF input through drag-and-drop, the Windows file picker, or an optional startup image path.
+The editor accepts PNG, JPG, JPEG, JFIF, GIF, and WebP input through drag-and-drop, the Windows file picker, or an optional startup image path.
 
 ---
 
@@ -67,7 +67,7 @@ The editor accepts PNG, JPG, JPEG, JFIF, and GIF input through drag-and-drop, th
 - Zoom and pan in the preview without mutating source or export dimensions
 - Windows file picker support for input and output
 - PNG and JPEG export from the final rendered framebuffer
-- GIF, MP4, and WebM animation export through FFmpeg
+- GIF, animated WebP, MP4, and WebM animation export through FFmpeg
 - Planned export targets visible in the UI: SVG, Text, and Three.js
 
 ---
@@ -88,7 +88,7 @@ The editor accepts PNG, JPG, JPEG, JFIF, and GIF input through drag-and-drop, th
 ## Technical Highlights
 
 - C++20 core library for image IO, processing, ASCII, dithering, and pixel sorting
-- stb_image / stb_image_write based PNG, JPEG, and GIF frame loading
+- stb_image / stb_image_write based PNG, JPEG, and GIF frame loading, with WebP import decoded through FFmpeg
 - OpenGL 3.3 shader pipeline for live GPU effects
 - Full printable ASCII glyph atlas support for shader-rendered text effects
 - Noise-field distortion implemented as a procedural vector field before effect sampling
@@ -130,7 +130,7 @@ Notes:
 - The core build requires stb headers. Install stb through vcpkg or pass `-DSTB_INCLUDE_DIR=<path>`.
 - The GUI build expects OpenGL, glfw3, and imgui from the configured vcpkg toolchain.
 - PNG and JPEG still export are wired.
-- GIF, MP4, and WebM animation export require `ffmpeg` on PATH.
+- GIF, animated WebP, MP4, and WebM animation export require `ffmpeg` on PATH.
 - SVG, Text, and Three.js export tiles are visible as planned formats.
 
 ---

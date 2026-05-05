@@ -15,7 +15,7 @@
 - Fixed left input/effects rail, central preview, and scrollable right settings/export rail.
 - Layout follows the ShaderLoom reference screenshots.
 - Image loading through startup path, Windows browse dialog, and drag/drop.
-- PNG, JPG, and animated GIF input.
+- PNG, JPG, animated GIF, and WebP input.
 - Real OpenGL texture preview for loaded PNG/JPG files.
 - Preview-only zoom and pan state.
 - PS2-era inspired visual shell with black/deep purple-blue depth, glassy rails, and a ShaderLoom wordmark.

@@ -165,6 +165,26 @@ void main() {
 }
 )";
 
+constexpr const char* BlendFragmentShader = R"(
+#version 330 core
+in vec2 vTexCoord;
+out vec4 fragColor;
+uniform sampler2D uFirst;
+uniform sampler2D uSecond;
+uniform float uAmount;
+
+void main() {
+    vec4 first = texture(uFirst, vTexCoord);
+    vec4 second = texture(uSecond, vTexCoord);
+    float amount = clamp(uAmount, 0.0, 1.0);
+    vec4 firstPremul = vec4(first.rgb * first.a, first.a);
+    vec4 secondPremul = vec4(second.rgb * second.a, second.a);
+    vec4 mixedPremul = mix(firstPremul, secondPremul, amount);
+    vec3 rgb = mixedPremul.a > 0.0001 ? mixedPremul.rgb / mixedPremul.a : vec3(0.0);
+    fragColor = vec4(clamp(rgb, vec3(0.0), vec3(1.0)), clamp(mixedPremul.a, 0.0, 1.0));
+}
+)";
+
 constexpr const char* PreprocessFragmentShader = R"(
 #version 330 core
 in vec2 vTexCoord;
@@ -1391,6 +1411,7 @@ void PreviewPipeline::initialize() {
     contourShader_.compile(PassthroughVertexShader, ContourFragmentShader);
     pixelSortShader_.compile(PassthroughVertexShader, PixelSortFragmentShader);
     postShader_.compile(PassthroughVertexShader, PostFragmentShader);
+    blendShader_.compile(PassthroughVertexShader, BlendFragmentShader);
     quad_.initialize();
     initialized_ = true;
 }
@@ -1404,6 +1425,7 @@ GLuint PreviewPipeline::render(
     const PreviewRenderSettings& settings
 ) {
     initialize();
+    blendOutputActive_ = false;
     const int outputWidth = std::max(1, renderWidth);
     const int outputHeight = std::max(1, renderHeight);
     const int logicalRenderWidth = std::max(1, logicalWidth);
@@ -1584,24 +1606,68 @@ GLuint PreviewPipeline::render(
     return outputTexture_.id();
 }
 
+GLuint PreviewPipeline::blendOutputs(GLuint firstTexture, GLuint secondTexture, float amount) {
+    initialize();
+    if (outputTexture_.id() == 0 || outputTexture_.width() <= 0 || outputTexture_.height() <= 0) {
+        throw std::runtime_error("No rendered output is available to blend.");
+    }
+
+    const int outputWidth = outputTexture_.width();
+    const int outputHeight = outputTexture_.height();
+    blendTexture_.resize(outputWidth, outputHeight);
+    blendFramebuffer_.attach(blendTexture_);
+    blendFramebuffer_.bind();
+    glViewport(0, 0, outputWidth, outputHeight);
+    glDisable(GL_BLEND);
+    glClearColor(0.0F, 0.0F, 0.0F, 0.0F);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    blendShader_.use();
+    glActiveTexturePtr(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, firstTexture);
+    blendShader_.setInt("uFirst", 0);
+    glActiveTexturePtr(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, secondTexture);
+    blendShader_.setInt("uSecond", 1);
+    glActiveTexturePtr(GL_TEXTURE0);
+    blendShader_.setFloat("uAmount", amount);
+    quad_.draw();
+    glActiveTexturePtr(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexturePtr(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgramPtr(0);
+    Framebuffer::bindDefault();
+
+    blendOutputActive_ = true;
+    return blendTexture_.id();
+}
+
 Image PreviewPipeline::readOutputImage() const {
     if (!hasOutput()) {
         throw std::runtime_error("No rendered output is available to export.");
     }
 
-    outputFramebuffer_.bind();
-    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(outputTexture_.width() * outputTexture_.height() * 4));
-    glReadPixels(0, 0, outputTexture_.width(), outputTexture_.height(), GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    const RenderTexture& texture = blendOutputActive_ ? blendTexture_ : outputTexture_;
+    const Framebuffer& framebuffer = blendOutputActive_ ? blendFramebuffer_ : outputFramebuffer_;
+    framebuffer.bind();
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(texture.width() * texture.height() * 4));
+    glReadPixels(0, 0, texture.width(), texture.height(), GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
     Framebuffer::bindDefault();
 
-    return Image(outputTexture_.width(), outputTexture_.height(), std::move(pixels));
+    return Image(texture.width(), texture.height(), std::move(pixels));
 }
 
 bool PreviewPipeline::hasOutput() const noexcept {
+    if (blendOutputActive_) {
+        return blendTexture_.id() != 0 && blendTexture_.width() > 0 && blendTexture_.height() > 0;
+    }
     return outputTexture_.id() != 0 && outputTexture_.width() > 0 && outputTexture_.height() > 0;
 }
 
 void PreviewPipeline::reset() {
+    blendFramebuffer_.reset();
+    blendTexture_.reset();
     preprocessFramebuffer_.reset();
     preprocessTexture_.reset();
     effectFramebuffer_.reset();
@@ -1618,6 +1684,8 @@ void PreviewPipeline::reset() {
     contourShader_ = ShaderProgram();
     pixelSortShader_ = ShaderProgram();
     postShader_ = ShaderProgram();
+    blendShader_ = ShaderProgram();
+    blendOutputActive_ = false;
     initialized_ = false;
 }
 

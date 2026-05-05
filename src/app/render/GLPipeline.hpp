@@ -196,6 +196,7 @@ public:
         int logicalHeight,
         const PreviewRenderSettings& settings
     );
+    GLuint blendOutputs(GLuint firstTexture, GLuint secondTexture, float amount);
     [[nodiscard]] Image readOutputImage() const;
     [[nodiscard]] bool hasOutput() const noexcept;
     void reset();
@@ -211,13 +212,17 @@ private:
     ShaderProgram contourShader_;
     ShaderProgram pixelSortShader_;
     ShaderProgram postShader_;
+    ShaderProgram blendShader_;
     RenderTexture preprocessTexture_;
     Framebuffer preprocessFramebuffer_;
     RenderTexture effectTexture_;
     Framebuffer effectFramebuffer_;
     RenderTexture outputTexture_;
     Framebuffer outputFramebuffer_;
+    RenderTexture blendTexture_;
+    Framebuffer blendFramebuffer_;
     FullscreenQuad quad_;
+    bool blendOutputActive_ = false;
 };
 
 void loadOpenGLPipelineFunctions();
